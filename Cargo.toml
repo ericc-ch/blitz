@@ -98,7 +98,7 @@ dioxus-cli-config = { version = "0.7.3" }
 dioxus-core-macro = { version = "0.7.3" }
 
 # Taffy + Parley + Fontations
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "9cda56b0d1ec413bfb511187dbc3ada6d9b7e3a4", default-features = false, features = [
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "cdf7f443ed9902ce2488e8d86849dc437bf9221a", default-features = false, features = [
     "std",
     "flexbox",
     "flexbox_balance",
@@ -252,6 +252,8 @@ log-frame-times = ["dioxus-native/log-frame-times"]
 log-phase-times = ["dioxus-native/log-phase-times"]
 # PROTOTYPE: lay out sibling subtrees in parallel
 parallel-layout = ["blitz-dom/parallel-layout"]
+# PROTOTYPE: round layouts using the best instructions that the CPU is detected to support
+simd-rounding = ["blitz-dom/simd-rounding"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
