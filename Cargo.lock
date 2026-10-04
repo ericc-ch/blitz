@@ -968,6 +968,7 @@ dependencies = [
  "env_logger",
  "euclid",
  "image",
+ "mimalloc",
  "peniko",
  "png 0.18.1",
  "rayon",
