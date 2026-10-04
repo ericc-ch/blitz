@@ -442,10 +442,26 @@ impl BaseDocument {
         // println!("\n\nRESOLVE LAYOUT\n===========\n");
 
         #[cfg(feature = "parallel-layout")]
-        self.compute_layout_subtree_info(self.root_element().id);
+        {
+            use crate::layout::parallel::LAYOUT_PHASE_NS;
+            use std::sync::atomic::Ordering::Relaxed;
+            let start = std::time::Instant::now();
+            self.compute_layout_subtree_info(self.root_element().id);
+            LAYOUT_PHASE_NS[0].store(start.elapsed().as_nanos() as u64, Relaxed);
 
-        taffy::compute_root_layout(self, root_element_id, available_space);
-        taffy::round_layout(self, root_element_id);
+            let start = std::time::Instant::now();
+            taffy::compute_root_layout(self, root_element_id, available_space);
+            LAYOUT_PHASE_NS[1].store(start.elapsed().as_nanos() as u64, Relaxed);
+
+            let start = std::time::Instant::now();
+            taffy::round_layout(self, root_element_id);
+            LAYOUT_PHASE_NS[2].store(start.elapsed().as_nanos() as u64, Relaxed);
+        }
+        #[cfg(not(feature = "parallel-layout"))]
+        {
+            taffy::compute_root_layout(self, root_element_id, available_space);
+            taffy::round_layout(self, root_element_id);
+        }
 
         // println!("\n\n");
         // taffy::print_tree(self, root_node_id)
