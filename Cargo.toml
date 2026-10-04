@@ -98,7 +98,7 @@ dioxus-cli-config = { version = "0.7.3" }
 dioxus-core-macro = { version = "0.7.3" }
 
 # Taffy + Parley + Fontations
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "2c81b8e09d172c2e4d7747be2b1e5a03e0f30bf0", default-features = false, features = [
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "15f6189eee53c46b20fee7d178127299bb90b9d2", default-features = false, features = [
     "std",
     "flexbox",
     "flexbox_balance",
@@ -250,6 +250,8 @@ publish = false
 log-times = ["log-frame-times", "log-phase-times"]
 log-frame-times = ["dioxus-native/log-frame-times"]
 log-phase-times = ["dioxus-native/log-phase-times"]
+# PROTOTYPE: lay out sibling subtrees in parallel
+parallel-layout = ["blitz-dom/parallel-layout"]
 
 [dev-dependencies]
 anyrender = { workspace = true }
@@ -288,6 +290,7 @@ vello_common = "0.3"
 wgpu = { workspace = true }
 wgpu_context = { workspace = true }
 rustc-hash = { workspace = true }
+rayon = { workspace = true }
 
 # [patch.crates-io]
 # anyrender = { path = "../anyrender/crates/anyrender" }

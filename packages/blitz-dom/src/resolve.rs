@@ -441,6 +441,9 @@ impl BaseDocument {
 
         // println!("\n\nRESOLVE LAYOUT\n===========\n");
 
+        #[cfg(feature = "parallel-layout")]
+        self.compute_layout_subtree_info(self.root_element().id);
+
         taffy::compute_root_layout(self, root_element_id, available_space);
         taffy::round_layout(self, root_element_id);
 
