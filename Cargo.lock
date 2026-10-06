@@ -7989,7 +7989,7 @@ dependencies = [
 [[package]]
 name = "taffy"
 version = "0.14.0"
-source = "git+https://github.com/DioxusLabs/taffy?rev=cdf7f443ed9902ce2488e8d86849dc437bf9221a#cdf7f443ed9902ce2488e8d86849dc437bf9221a"
+source = "git+https://github.com/DioxusLabs/taffy?rev=8a09793b0c0534f2912b276e40975e696cc821ef#8a09793b0c0534f2912b276e40975e696cc821ef"
 dependencies = [
  "fearless_simd 1.0.0",
  "serde",

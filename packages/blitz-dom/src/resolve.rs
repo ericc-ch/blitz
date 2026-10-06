@@ -480,13 +480,15 @@ impl BaseDocument {
             }
             LAYOUT_PHASE_NS[0].store(start.elapsed().as_nanos() as u64, Relaxed);
 
-            let start = std::time::Instant::now();
-            taffy::compute_root_layout(self, root_element_id, available_space);
-            LAYOUT_PHASE_NS[1].store(start.elapsed().as_nanos() as u64, Relaxed);
+            self.run_layout_pass(root_element_id, move |doc| {
+                let start = std::time::Instant::now();
+                taffy::compute_root_layout(doc, root_element_id, available_space);
+                LAYOUT_PHASE_NS[1].store(start.elapsed().as_nanos() as u64, Relaxed);
 
-            let start = std::time::Instant::now();
-            taffy::round_layout(self, root_element_id);
-            LAYOUT_PHASE_NS[2].store(start.elapsed().as_nanos() as u64, Relaxed);
+                let start = std::time::Instant::now();
+                taffy::round_layout(doc, root_element_id);
+                LAYOUT_PHASE_NS[2].store(start.elapsed().as_nanos() as u64, Relaxed);
+            });
         }
         #[cfg(not(feature = "parallel-layout"))]
         {
