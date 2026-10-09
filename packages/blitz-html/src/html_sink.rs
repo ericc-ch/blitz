@@ -13,6 +13,7 @@ use html5ever::{
     tendril::{StrTendril, TendrilSink},
     tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
 };
+use xml5ever::tree_builder::XmlTreeSink;
 
 /// Convert an html5ever Attribute which uses tendril for its value to a blitz Attribute
 /// which uses String.
@@ -137,9 +138,13 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
     pub fn parse_xml_into_mutator<'a, 'd>(mutr: &'a mut DocumentMutator<'d>, xml: &str) {
         let mut sink = DocumentHtmlParser::new(mutr);
         sink.is_xml = true;
+        // Internal general entities are not part of any parser's token
+        // stream: expand the internal subset up front, bounded against
+        // billion laughs (see `entity`).
+        let expanded = crate::entity::expand_internal_general_entities(xml);
         xml5ever::driver::parse_document(sink, Default::default())
             .from_utf8()
-            .read_from(&mut xml.as_bytes())
+            .read_from(&mut expanded.as_bytes())
             .unwrap();
     }
 
@@ -386,6 +391,12 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     fn reparent_children(&self, old_parent_id: &Self::Handle, new_parent_id: &Self::Handle) {
         self.mutr()
             .reparent_children(*old_parent_id, *new_parent_id);
+    }
+}
+
+impl<'m, 'doc> XmlTreeSink for DocumentHtmlParser<'m, 'doc> {
+    fn create_cdata_section(&self, contents: StrTendril) -> Self::Handle {
+        self.mutr().create_cdata_section_node(&contents)
     }
 }
 
