@@ -167,10 +167,29 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
 
         // html5ever creates a new fragment root node under the document node and parses the nodes into that fragment root.
         // So here we move the children of the fragment root to element_id and then drop the fragment root.
+        // A template context receives its children in its template contents
+        // instead: fragment parsing never opens the context element, so the
+        // template modes have no open template to route into
+        // (<https://html.spec.whatwg.org/multipage/parsing.html#parsing-html-fragments>).
         let document_id = mutr.doc.root_node().id;
         let fragment_root_id = mutr.last_child_id(document_id).unwrap();
         let child_ids = mutr.child_ids(fragment_root_id);
-        mutr.append_children(element_id, &child_ids);
+        let destination = {
+            let is_template = mutr
+                .doc
+                .get_node(element_id)
+                .and_then(|node| node.data.downcast_element())
+                .is_some_and(|element| {
+                    element.name.ns == markup5ever::ns!(html)
+                        && element.name.local.as_ref() == "template"
+                });
+            if is_template {
+                mutr.ensure_template_contents(element_id)
+            } else {
+                element_id
+            }
+        };
+        mutr.append_children(destination, &child_ids);
         mutr.remove_and_drop_node(fragment_root_id);
     }
 

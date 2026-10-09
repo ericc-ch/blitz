@@ -164,7 +164,7 @@ impl DocumentMutator<'_> {
     }
 
     pub fn create_fragment_node(&mut self) -> NodeId {
-        self.doc.create_node(NodeData::Fragment)
+        self.doc.create_node(NodeData::Fragment { host: None })
     }
 
     /// Whether `id` is an HTML `template` element, the only element with
@@ -195,9 +195,21 @@ impl DocumentMutator<'_> {
     /// (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
     pub fn ensure_template_contents(&mut self, template: NodeId) -> NodeId {
         if let Some(contents) = self.template_contents(template) {
+            // Backfill the host link for fragments created before it existed.
+            if let Some(node) = self.doc.get_node_mut(contents)
+                && let NodeData::Fragment { host } = &mut node.data
+                && host.is_none()
+            {
+                *host = Some(template);
+            }
             return contents;
         }
         let fragment = self.create_fragment_node();
+        if let Some(node) = self.doc.get_node_mut(fragment)
+            && let NodeData::Fragment { host } = &mut node.data
+        {
+            *host = Some(template);
+        }
         if let Some(node) = self.doc.get_node_mut(template)
             && let Some(element) = node.data.downcast_element_mut()
         {

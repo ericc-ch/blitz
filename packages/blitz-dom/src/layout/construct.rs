@@ -1008,7 +1008,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
             // Fragments never generate boxes themselves; their children are
             // processed through their own parents (template contents are
             // detached and never reach layout at all).
-            NodeData::Fragment => {
+            NodeData::Fragment { .. } => {
                 node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
             // Doctype, processing instructions, and CDATA sections never
@@ -1325,7 +1325,7 @@ pub(crate) fn build_inline_layout_into(
             NodeData::Comment { .. }
             | NodeData::Doctype { .. }
             | NodeData::ProcessingInstruction { .. }
-            | NodeData::Fragment => {
+            | NodeData::Fragment { .. } => {
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
             NodeData::Document(_) => unreachable!(),

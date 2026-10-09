@@ -171,7 +171,7 @@ fn write_node(out: &mut String, doc: &blitz_dom::BaseDocument, node: &Node, dept
         NodeData::CDataSection { contents } => {
             writeln!(out, "<![CDATA[{:?}]]>", truncate(contents.trim(), 60)).unwrap();
         }
-        NodeData::Fragment => {
+        NodeData::Fragment { .. } => {
             writeln!(out, "#fragment{geometry}").unwrap();
         }
         NodeData::Element(data) => {

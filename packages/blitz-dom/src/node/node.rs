@@ -755,7 +755,14 @@ pub enum NodeData {
     /// Template contents fragments live here, detached from the document
     /// tree and referenced by their host element's `template_contents`
     /// slot (<https://dom.spec.whatwg.org/#interface-documentfragment>).
-    Fragment,
+    /// `host` is the template element for template contents, if any: cycle
+    /// checks treat the fragment as a child of its host (host-including
+    /// inclusive ancestry,
+    /// <https://dom.spec.whatwg.org/#concept-tree-host-including-inclusive-ancestor>).
+    Fragment {
+        /// The template element hosting these contents, if any.
+        host: Option<NodeId>,
+    },
 }
 
 impl NodeData {
@@ -805,7 +812,7 @@ impl NodeData {
             NodeData::Doctype { .. } => NodeKind::Doctype,
             NodeData::ProcessingInstruction { .. } => NodeKind::ProcessingInstruction,
             NodeData::CDataSection { .. } => NodeKind::CDataSection,
-            NodeData::Fragment => NodeKind::Fragment,
+            NodeData::Fragment { .. } => NodeKind::Fragment,
         }
     }
 }
@@ -956,7 +963,7 @@ impl Node {
             NodeData::Doctype { name, .. } => write!(s, "DOCTYPE {name}"),
             NodeData::ProcessingInstruction { target, .. } => write!(s, "PI {target}"),
             NodeData::CDataSection { .. } => write!(s, "CDATA"),
-            NodeData::Fragment => write!(s, "FRAGMENT"),
+            NodeData::Fragment { .. } => write!(s, "FRAGMENT"),
             NodeData::Text(data) => {
                 let bytes = data.content.as_bytes();
                 write!(
@@ -1074,7 +1081,7 @@ impl Node {
                 writer.push_str(contents);
                 writer.push_str("]]>");
             }
-            NodeData::Fragment => {
+            NodeData::Fragment { .. } => {
                 for child_id in self.children.clone() {
                     self.tree()[child_id].write_outer_html_in_style(writer, style, nesting + 1);
                 }
@@ -1175,7 +1182,7 @@ impl Node {
                 out.push_str(contents);
             }
             // A fragment contributes its children's text.
-            NodeData::Fragment => {
+            NodeData::Fragment { .. } => {
                 for child_id in self.children.iter() {
                     self.tree()[*child_id].write_text_content(out);
                 }

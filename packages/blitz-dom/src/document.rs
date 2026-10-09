@@ -1068,6 +1068,20 @@ impl BaseDocument {
             {
                 data.template_contents = Some(new_contents);
             }
+            if let Some(NodeData::Fragment { host }) =
+                self.nodes.get_mut(new_contents).map(|node| &mut node.data)
+            {
+                *host = Some(new_node_id);
+            }
+        }
+
+        // A directly cloned fragment is nobody's contents.
+        if let Some(NodeData::Fragment { host }) = self
+            .nodes
+            .get_mut(new_node_id)
+            .map(|node| &mut node.data)
+        {
+            *host = None;
         }
 
         // Recursively clone children

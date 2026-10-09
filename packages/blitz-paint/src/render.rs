@@ -577,7 +577,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // unreachable!()
             }
             NodeData::Document(_) => {}
-            NodeData::Fragment => {}
+            NodeData::Fragment { .. } => {}
             NodeData::Doctype { .. } => {}
             NodeData::Comment { .. } => {}
             NodeData::ProcessingInstruction { .. } => {}
