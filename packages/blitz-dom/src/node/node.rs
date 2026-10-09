@@ -701,6 +701,7 @@ pub enum NodeKind {
     Doctype,
     ProcessingInstruction,
     CDataSection,
+    Fragment,
 }
 
 /// The different kinds of nodes in the DOM.
@@ -749,6 +750,12 @@ pub enum NodeData {
         /// The textual content of the section.
         contents: String,
     },
+
+    /// A document fragment: a container whose children are its content.
+    /// Template contents fragments live here, detached from the document
+    /// tree and referenced by their host element's `template_contents`
+    /// slot (<https://dom.spec.whatwg.org/#interface-documentfragment>).
+    Fragment,
 }
 
 impl NodeData {
@@ -798,6 +805,7 @@ impl NodeData {
             NodeData::Doctype { .. } => NodeKind::Doctype,
             NodeData::ProcessingInstruction { .. } => NodeKind::ProcessingInstruction,
             NodeData::CDataSection { .. } => NodeKind::CDataSection,
+            NodeData::Fragment => NodeKind::Fragment,
         }
     }
 }
@@ -948,6 +956,7 @@ impl Node {
             NodeData::Doctype { name, .. } => write!(s, "DOCTYPE {name}"),
             NodeData::ProcessingInstruction { target, .. } => write!(s, "PI {target}"),
             NodeData::CDataSection { .. } => write!(s, "CDATA"),
+            NodeData::Fragment => write!(s, "FRAGMENT"),
             NodeData::Text(data) => {
                 let bytes = data.content.as_bytes();
                 write!(
@@ -1065,6 +1074,11 @@ impl Node {
                 writer.push_str(contents);
                 writer.push_str("]]>");
             }
+            NodeData::Fragment => {
+                for child_id in self.children.clone() {
+                    self.tree()[child_id].write_outer_html_in_style(writer, style, nesting + 1);
+                }
+            }
             NodeData::AnonymousBlock(_) => {}
             NodeData::Text(data) => {
                 if matches!(style, OutputStyle::Pretty) {
@@ -1159,6 +1173,12 @@ impl Node {
             // text content of its ancestors exactly like text.
             NodeData::CDataSection { contents } => {
                 out.push_str(contents);
+            }
+            // A fragment contributes its children's text.
+            NodeData::Fragment => {
+                for child_id in self.children.iter() {
+                    self.tree()[*child_id].write_text_content(out);
+                }
             }
             NodeData::Element(..) | NodeData::AnonymousBlock(..) => {
                 for child_id in self.children.iter() {

@@ -564,6 +564,7 @@ impl PrintTree for BaseDocument {
             NodeData::Doctype { .. } => "DOCTYPE",
             NodeData::Text { .. } => node.node_debug_str().leak(),
             NodeData::Comment { .. } => "COMMENT",
+            NodeData::Fragment => "FRAGMENT",
             NodeData::ProcessingInstruction { .. } => "PROCESSING INSTRUCTION",
             NodeData::CDataSection { .. } => "CDATA",
             NodeData::AnonymousBlock(_) => "ANONYMOUS BLOCK",

@@ -337,8 +337,10 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     }
 
     fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
-        // TODO: implement templates properly. This should allow to function like regular elements.
-        *target
+        // Template children parse into the template contents fragment, not
+        // the element's children
+        // (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
+        self.mutr().ensure_template_contents(*target)
     }
 
     fn same_node(&self, x: &Self::Handle, y: &Self::Handle) -> bool {

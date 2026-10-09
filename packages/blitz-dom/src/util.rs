@@ -122,6 +122,8 @@ pub fn walk_tree(indent: usize, node: &Node) {
 
         NodeData::Comment { .. } => println!("<!-- COMMENT {id} -->"),
 
+        NodeData::Fragment => println!("#{id} #fragment"),
+
         NodeData::AnonymousBlock(_) => println!("{id} AnonymousBlock"),
 
         NodeData::Element(data) => {

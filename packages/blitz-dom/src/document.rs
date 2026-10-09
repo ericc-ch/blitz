@@ -989,6 +989,15 @@ impl BaseDocument {
             for &anon_id in &node.anonymous_blocks {
                 self.deallocate_anonymous_block(anon_id);
             }
+
+            // A dropped template element takes its contents fragment with it.
+            // (Detach keeps the contents: the slot travels with the element,
+            // so moves preserve it.)
+            if let NodeData::Element(element) = &node.data
+                && let Some(contents) = element.template_contents
+            {
+                self.drop_node_ignoring_parent_with(contents, on_drop);
+            }
         }
         node
     }
@@ -1042,6 +1051,24 @@ impl BaseDocument {
 
         // Create new node
         let new_node_id = self.create_node(data);
+
+        // A cloned template element gets a cloned contents fragment: the
+        // cloned element data still points at the original fragment.
+        let old_contents = match &self.nodes[new_node_id].data {
+            NodeData::Element(elem) => elem.template_contents,
+            _ => None,
+        };
+        if let Some(old_contents) = old_contents
+            && self.get_node(old_contents).is_some()
+        {
+            let new_contents = self.deep_clone_node(old_contents);
+            if let Some(data) = self.nodes[new_node_id]
+                .data
+                .downcast_element_mut()
+            {
+                data.template_contents = Some(new_contents);
+            }
+        }
 
         // Recursively clone children
         let new_children: ThinVec<NodeId> = children

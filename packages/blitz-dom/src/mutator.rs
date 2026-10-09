@@ -163,6 +163,49 @@ impl DocumentMutator<'_> {
         })
     }
 
+    pub fn create_fragment_node(&mut self) -> NodeId {
+        self.doc.create_node(NodeData::Fragment)
+    }
+
+    /// Whether `id` is an HTML `template` element, the only element with
+    /// template contents
+    /// (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
+    pub fn is_template_element(&self, id: NodeId) -> bool {
+        self.doc.get_node(id).is_some_and(|node| {
+            node.data.downcast_element().is_some_and(|element| {
+                element.name.ns == markup5ever::ns!(html)
+                    && element.name.local.as_ref() == "template"
+            })
+        })
+    }
+
+    /// The template contents fragment of `template`, if it has one.
+    pub fn template_contents(&self, template: NodeId) -> Option<NodeId> {
+        self.doc.get_node(template).and_then(|node| {
+            node.data
+                .downcast_element()
+                .and_then(|element| element.template_contents)
+        })
+    }
+
+    /// Creates the template contents fragment for `template` when missing
+    /// and returns it. A new `template` element is born with empty contents;
+    /// the parser appends into the fragment through `get_template_contents`
+    /// instead of the element's children
+    /// (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
+    pub fn ensure_template_contents(&mut self, template: NodeId) -> NodeId {
+        if let Some(contents) = self.template_contents(template) {
+            return contents;
+        }
+        let fragment = self.create_fragment_node();
+        if let Some(node) = self.doc.get_node_mut(template)
+            && let Some(element) = node.data.downcast_element_mut()
+        {
+            element.template_contents = Some(fragment);
+        }
+        fragment
+    }
+
     pub fn create_text_node(&mut self, text: &str) -> NodeId {
         self.doc.create_text_node(text)
     }
@@ -170,6 +213,11 @@ impl DocumentMutator<'_> {
     pub fn create_element(&mut self, name: QualName, attrs: Vec<Attribute>) -> NodeId {
         let mut data = ElementData::new(name, attrs);
         data.flush_style_attribute(self.doc.guard(), &self.doc.url.url_extra_data());
+
+        // A new HTML `template` element is born with empty template contents
+        // (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
+        let is_template =
+            data.name.ns == markup5ever::ns!(html) && data.name.local.as_ref() == "template";
 
         let id = self.doc.create_node(NodeData::Element(Box::new(data)));
         let node = self.doc.get_node_mut(id).unwrap();
@@ -179,6 +227,10 @@ impl DocumentMutator<'_> {
             damage: ALL_DAMAGE,
             ..Default::default()
         };
+
+        if is_template {
+            self.ensure_template_contents(id);
+        }
 
         id
     }

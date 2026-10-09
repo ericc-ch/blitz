@@ -1005,6 +1005,12 @@ pub(crate) fn find_inline_layout_embedded_boxes(
             NodeData::Comment { .. } | NodeData::Text(_) => {
                 node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
+            // Fragments never generate boxes themselves; their children are
+            // processed through their own parents (template contents are
+            // detached and never reach layout at all).
+            NodeData::Fragment => {
+                node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+            }
             // Doctype, processing instructions, and CDATA sections never
             // generate boxes: CDATA contributes only character data to its
             // parent's text, like a comment contributes nothing.
@@ -1318,7 +1324,8 @@ pub(crate) fn build_inline_layout_into(
             },
             NodeData::Comment { .. }
             | NodeData::Doctype { .. }
-            | NodeData::ProcessingInstruction { .. } => {
+            | NodeData::ProcessingInstruction { .. }
+            | NodeData::Fragment => {
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
             NodeData::Document(_) => unreachable!(),
