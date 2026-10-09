@@ -137,6 +137,32 @@ impl DocumentMutator<'_> {
         })
     }
 
+    pub fn create_doctype_node(
+        &mut self,
+        name: &str,
+        public_id: &str,
+        system_id: &str,
+    ) -> NodeId {
+        self.doc.create_node(NodeData::Doctype {
+            name: name.to_string(),
+            public_id: public_id.to_string(),
+            system_id: system_id.to_string(),
+        })
+    }
+
+    pub fn create_processing_instruction_node(&mut self, target: &str, contents: &str) -> NodeId {
+        self.doc.create_node(NodeData::ProcessingInstruction {
+            target: target.to_string(),
+            contents: contents.to_string(),
+        })
+    }
+
+    pub fn create_cdata_section_node(&mut self, contents: &str) -> NodeId {
+        self.doc.create_node(NodeData::CDataSection {
+            contents: contents.to_string(),
+        })
+    }
+
     pub fn create_text_node(&mut self, text: &str) -> NodeId {
         self.doc.create_text_node(text)
     }

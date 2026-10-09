@@ -698,6 +698,9 @@ pub enum NodeKind {
     AnonymousBlock,
     Text,
     Comment,
+    Doctype,
+    ProcessingInstruction,
+    CDataSection,
 }
 
 /// The different kinds of nodes in the DOM.
@@ -720,12 +723,32 @@ pub enum NodeData {
         /// The textual content of the comment
         contents: String,
     },
-    // /// A `DOCTYPE` with name, public id, and system id. See
-    // /// [document type declaration on wikipedia][https://en.wikipedia.org/wiki/Document_type_declaration]
-    // Doctype { name: String, public_id: String, system_id: String },
+    /// A `DOCTYPE` with name, public id, and system id. See
+    /// [document type declaration on wikipedia][https://en.wikipedia.org/wiki/Document_type_declaration]
+    Doctype {
+        /// The doctype name (usually `html`).
+        name: String,
+        /// The public identifier, if any.
+        public_id: String,
+        /// The system identifier, if any.
+        system_id: String,
+    },
 
-    // /// A Processing instruction.
-    // ProcessingInstruction { target: String, contents: String },
+    /// A processing instruction with target and data.
+    ProcessingInstruction {
+        /// The PI target.
+        target: String,
+        /// The PI data (contents).
+        contents: String,
+    },
+
+    /// A CDATA section. Like text it holds character data, but it is its
+    /// own node kind
+    /// (<https://dom.spec.whatwg.org/#interface-cdatasection>).
+    CDataSection {
+        /// The textual content of the section.
+        contents: String,
+    },
 }
 
 impl NodeData {
@@ -772,6 +795,9 @@ impl NodeData {
             NodeData::AnonymousBlock(_) => NodeKind::AnonymousBlock,
             NodeData::Text(_) => NodeKind::Text,
             NodeData::Comment { .. } => NodeKind::Comment,
+            NodeData::Doctype { .. } => NodeKind::Doctype,
+            NodeData::ProcessingInstruction { .. } => NodeKind::ProcessingInstruction,
+            NodeData::CDataSection { .. } => NodeKind::CDataSection,
         }
     }
 }
@@ -919,7 +945,9 @@ impl Node {
 
         match &self.data {
             NodeData::Document(_) => write!(s, "DOCUMENT"),
-            // NodeData::Doctype { name, .. } => write!(s, "DOCTYPE {name}"),
+            NodeData::Doctype { name, .. } => write!(s, "DOCTYPE {name}"),
+            NodeData::ProcessingInstruction { target, .. } => write!(s, "PI {target}"),
+            NodeData::CDataSection { .. } => write!(s, "CDATA"),
             NodeData::Text(data) => {
                 let bytes = data.content.as_bytes();
                 write!(
@@ -1007,8 +1035,37 @@ impl Node {
         match &self.data {
             NodeData::Document(_) => {}
             NodeData::Comment { .. } => {}
+            NodeData::Doctype {
+                name,
+                public_id,
+                system_id,
+            } => {
+                writer.push_str("<!DOCTYPE ");
+                writer.push_str(name);
+                if !public_id.is_empty() || !system_id.is_empty() {
+                    writer.push_str(" PUBLIC \"");
+                    writer.push_str(public_id);
+                    writer.push_str("\" \"");
+                    writer.push_str(system_id);
+                    writer.push('"');
+                }
+                writer.push('>');
+            }
+            NodeData::ProcessingInstruction { target, contents } => {
+                writer.push_str("<?");
+                writer.push_str(target);
+                if !contents.is_empty() {
+                    writer.push(' ');
+                    writer.push_str(contents);
+                }
+                writer.push_str("?>");
+            }
+            NodeData::CDataSection { contents } => {
+                writer.push_str("<![CDATA[");
+                writer.push_str(contents);
+                writer.push_str("]]>");
+            }
             NodeData::AnonymousBlock(_) => {}
-            // NodeData::Doctype { name, .. } => write!(s, "DOCTYPE {name}"),
             NodeData::Text(data) => {
                 if matches!(style, OutputStyle::Pretty) {
                     for _ in 0..nesting {
@@ -1097,6 +1154,11 @@ impl Node {
         match &self.data {
             NodeData::Text(data) => {
                 out.push_str(&data.content);
+            }
+            // A CDATA section is character data: it contributes to the
+            // text content of its ancestors exactly like text.
+            NodeData::CDataSection { contents } => {
+                out.push_str(contents);
             }
             NodeData::Element(..) | NodeData::AnonymousBlock(..) => {
                 for child_id in self.children.iter() {

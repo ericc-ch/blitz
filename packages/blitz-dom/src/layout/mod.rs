@@ -561,9 +561,11 @@ impl PrintTree for BaseDocument {
 
         match node.data {
             NodeData::Document(_) => "DOCUMENT",
-            // NodeData::Doctype { .. } => return "DOCTYPE",
+            NodeData::Doctype { .. } => "DOCTYPE",
             NodeData::Text { .. } => node.node_debug_str().leak(),
             NodeData::Comment { .. } => "COMMENT",
+            NodeData::ProcessingInstruction { .. } => "PROCESSING INSTRUCTION",
+            NodeData::CDataSection { .. } => "CDATA",
             NodeData::AnonymousBlock(_) => "ANONYMOUS BLOCK",
             NodeData::Element(_) => {
                 let style = node.style();
@@ -578,7 +580,7 @@ impl PrintTree for BaseDocument {
                     Display::None => "NONE",
                 };
                 format!("{} ({})", node.node_debug_str(), display).leak()
-            } // NodeData::ProcessingInstruction { .. } => return "PROCESSING INSTRUCTION",
+            }
         }
     }
 

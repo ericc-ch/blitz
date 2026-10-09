@@ -140,6 +140,15 @@ pub fn walk_tree(indent: usize, node: &Node) {
           //     ref system_id,
           // } => println!("<!DOCTYPE {} \"{}\" \"{}\">", name, public_id, system_id),
           // NodeData::ProcessingInstruction { .. } => unreachable!(),
+        NodeData::Doctype {
+            name,
+            public_id,
+            system_id,
+        } => println!("<!DOCTYPE {id} {name} \"{public_id}\" \"{system_id}\">"),
+        NodeData::ProcessingInstruction { target, .. } => {
+            println!("<?{target} {id}?>")
+        }
+        NodeData::CDataSection { contents } => println!("<![CDATA[{id}: {contents}]]>"),
     }
 
     if !node.children.is_empty() {

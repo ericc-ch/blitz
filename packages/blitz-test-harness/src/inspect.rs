@@ -162,6 +162,15 @@ fn write_node(out: &mut String, doc: &blitz_dom::BaseDocument, node: &Node, dept
         NodeData::Comment { contents } => {
             writeln!(out, "<!-- {:?} -->", truncate(contents.trim(), 60)).unwrap();
         }
+        NodeData::Doctype { name, .. } => {
+            writeln!(out, "<!DOCTYPE {name}>").unwrap();
+        }
+        NodeData::ProcessingInstruction { target, contents } => {
+            writeln!(out, "<?{target} {:?}>", truncate(contents.trim(), 60)).unwrap();
+        }
+        NodeData::CDataSection { contents } => {
+            writeln!(out, "<![CDATA[{:?}]]>", truncate(contents.trim(), 60)).unwrap();
+        }
         NodeData::Element(data) => {
             write!(out, "<{}", data.name.local).unwrap();
             if let Some(id) = node.attr(blitz_dom::local_name!("id")) {

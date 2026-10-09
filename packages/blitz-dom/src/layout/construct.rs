@@ -1005,6 +1005,14 @@ pub(crate) fn find_inline_layout_embedded_boxes(
             NodeData::Comment { .. } | NodeData::Text(_) => {
                 node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
+            // Doctype, processing instructions, and CDATA sections never
+            // generate boxes: CDATA contributes only character data to its
+            // parent's text, like a comment contributes nothing.
+            NodeData::Doctype { .. }
+            | NodeData::ProcessingInstruction { .. }
+            | NodeData::CDataSection { .. } => {
+                node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+            }
             NodeData::Document(_) => unreachable!(),
         }
     }
@@ -1295,7 +1303,22 @@ pub(crate) fn build_inline_layout_into(
                     }
                 }
             }
-            NodeData::Comment { .. } => {
+            // A CDATA section renders as its character data, exactly like
+            // text.
+            NodeData::CDataSection { contents } => match parent_text_transform {
+                TextTransform::UPPERCASE => {
+                    builder.push_text(&contents.to_uppercase());
+                }
+                TextTransform::LOWERCASE => {
+                    builder.push_text(&contents.to_lowercase());
+                }
+                _ => {
+                    builder.push_text(contents);
+                }
+            },
+            NodeData::Comment { .. }
+            | NodeData::Doctype { .. }
+            | NodeData::ProcessingInstruction { .. } => {
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
             NodeData::Document(_) => unreachable!(),

@@ -108,7 +108,8 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
                     exact_errors: false,
                     scripting_enabled: false, // Enables parsing of <noscript> tags
                     iframe_srcdoc: false,
-                    drop_doctype: true,
+                    // The doctype is a real document child; the sink keeps it.
+                    drop_doctype: false,
                     quirks_mode: QuirksMode::NoQuirks,
                 },
             };
@@ -214,8 +215,9 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         self.mutr().create_comment_node(&text)
     }
 
-    fn create_pi(&self, _target: StrTendril, _data: StrTendril) -> Self::Handle {
-        self.mutr().create_comment_node("")
+    fn create_pi(&self, target: StrTendril, data: StrTendril) -> Self::Handle {
+        self.mutr()
+            .create_processing_instruction_node(&target, &data)
     }
 
     fn append(&self, parent_id: &Self::Handle, child: NodeOrText<Self::Handle>) {
@@ -276,11 +278,17 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
 
     fn append_doctype_to_document(
         &self,
-        _name: StrTendril,
-        _public_id: StrTendril,
-        _system_id: StrTendril,
+        name: StrTendril,
+        public_id: StrTendril,
+        system_id: StrTendril,
     ) {
-        // Ignore. We don't care about the DOCTYPE for now.
+        // The doctype is a real child of the document
+        // (<https://html.spec.whatwg.org/multipage/parsing.html#the-initial-insertion-mode>).
+        let doctype = self
+            .mutr()
+            .create_doctype_node(&name, &public_id, &system_id);
+        let document = self.get_document();
+        self.mutr().append_children(document, &[doctype]);
     }
 
     fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
