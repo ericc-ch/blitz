@@ -96,6 +96,10 @@ impl BaseDocument {
         .unwrap_or_default();
 
         let Some(mut parsed_action) = self.resolve_url(action) else {
+            // Unresolvable form action: submission aborts without navigation.
+            // Failure disposition per
+            // <https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-algorithm>
+            // is a known gap.
             return;
         };
 

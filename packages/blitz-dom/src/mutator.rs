@@ -194,6 +194,10 @@ impl DocumentMutator<'_> {
     /// instead of the element's children
     /// (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
     pub fn ensure_template_contents(&mut self, template: NodeId) -> NodeId {
+        debug_assert!(
+            self.is_template_element(template),
+            "template contents belong on <template> only"
+        );
         if let Some(contents) = self.template_contents(template) {
             // Backfill the host link for fragments created before it existed.
             if let Some(node) = self.doc.get_node_mut(contents)
@@ -232,7 +236,10 @@ impl DocumentMutator<'_> {
             data.name.ns == markup5ever::ns!(html) && data.name.local.as_ref() == "template";
 
         let id = self.doc.create_node(NodeData::Element(Box::new(data)));
-        let node = self.doc.get_node_mut(id).unwrap();
+        let node = self
+            .doc
+            .get_node_mut(id)
+            .expect("freshly created node exists");
 
         // Initialise style data
         *node.stylo_element_data_mut().ensure_init_mut() = style::data::ElementData {
@@ -1145,6 +1152,11 @@ impl<'doc> DocumentMutator<'doc> {
         }
 
         let Some(url) = self.doc.resolve_url(href) else {
+            // Unresolvable stylesheet URL: strictly better than the old panic,
+            // but observable (no fetch, and no error event today). Matches the
+            // resolve_url contract; error-event semantics per
+            // <https://html.spec.whatwg.org/multipage/semantics.html#the-link-element>
+            // are a known gap.
             return;
         };
         let handler = ResourceHandler::new(
@@ -1196,6 +1208,9 @@ impl<'doc> DocumentMutator<'doc> {
         if let Some(raw_src) = node.attr(local_name!("src")) {
             if !raw_src.is_empty() {
                 let Some(src) = self.doc.resolve_url(raw_src) else {
+                    // Unresolvable `<img src>`: no fetch and (today) no `error`
+                    // event. Better than panicking; event semantics are a known
+                    // gap.
                     return;
                 };
                 let src_string = src.as_str();

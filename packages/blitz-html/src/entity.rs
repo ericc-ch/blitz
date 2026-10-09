@@ -6,13 +6,16 @@
 //! (<https://www.w3.org/TR/xml/#intern-replacement>).
 //!
 //! Includes internal general entities in the document instance. External and
-//! parameter entities stay unresolved.
+//! parameter entities stay unresolved: referencing one is a well-formedness
+//! violation and surfaces as a parse error (see `errors` out-param).
 //!
 //! Billion-laughs protection: entity expansion is bounded three ways.
 //! Declaration count caps HashMap memory; depth caps the call stack
 //! (`expand_replacement` recurses per nesting level); the byte budget caps
 //! total output (a doubling chain otherwise turns kilobytes into gigabytes).
-//! Exhaustion degrades gracefully: references stay literal text.
+//! Exhaustion surfaces one parse error and leaves the rest literal so the
+//! document fails closed into a `parsererror` instead of a silently wrong
+//! tree.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -23,25 +26,60 @@ const MAX_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ENTITY_OVERHEAD: usize = 1024;
 
 /// Expands internal general entities declared in the document type's
-/// internal subset, returning the input borrowed when there is nothing to
-/// expand.
-pub(crate) fn expand_internal_general_entities(input: &str) -> Cow<'_, str> {
+/// internal subset, returning the input borrowed when there is no subset to
+/// expand. Parse errors (undefined references, budget exhaustion) are
+/// collected for the sink to drain into a `parsererror` document
+/// (<https://www.w3.org/TR/xml/#sec-references>).
+pub(crate) fn expand_internal_general_entities_with_errors(
+    input: &str,
+) -> (Cow<'_, str>, Vec<String>) {
+    let mut errors = Vec::new();
     let Some((body_start, entities)) = scan_internal_general_entities(input) else {
-        return Cow::Borrowed(input);
+        return (Cow::Borrowed(input), errors);
     };
-    if entities.is_empty() {
-        return Cow::Borrowed(input);
-    }
     let mut output = String::with_capacity(input.len());
     output.push_str(&input[..body_start]);
     let mut budget = MAX_EXPANDED_BYTES;
-    expand_content(&input[body_start..], &entities, &mut output, &mut budget);
-    Cow::Owned(output)
+    expand_content(
+        &input[body_start..],
+        &entities,
+        &mut output,
+        &mut budget,
+        &mut errors,
+    );
+    if budget == 0 && !errors.iter().any(|e| e.contains("budget")) {
+        errors.push("entity expansion budget exhausted".to_string());
+    }
+    (Cow::Owned(output), errors)
+}
+
+fn find_doctype_keyword(input: &str) -> Option<usize> {
+    // Case-insensitive to match the tokenizer's `eat` (which uses
+    // `eq_ignore_ascii_case`): the XML spec wants uppercase-only
+    // `DOCTYPE` (<https://www.w3.org/TR/xml/#NT-doctypedecl>), but both
+    // layers stay lenient together so entity expansion and tokenizing agree.
+    let upper = "<!DOCTYPE";
+    if input.len() < upper.len() {
+        return None;
+    }
+    input
+        .as_bytes()
+        .windows(upper.len())
+        .position(|w| w.eq_ignore_ascii_case(upper.as_bytes()))
 }
 
 fn scan_internal_general_entities(input: &str) -> Option<(usize, HashMap<String, String>)> {
-    let doctype = input.find("<!DOCTYPE")?;
+    let doctype = find_doctype_keyword(input)?;
     let after_keyword = doctype + "<!DOCTYPE".len();
+    // `<!DOCTYPE` requires whitespace before the name
+    // (<https://www.w3.org/TR/xml/#NT-doctypedecl>).
+    if !input[after_keyword..]
+        .chars()
+        .next()
+        .is_some_and(is_xml_whitespace)
+    {
+        return None;
+    }
     let mut quote = None;
     let mut subset_start = None;
     for (index, character) in input[after_keyword..].char_indices() {
@@ -63,30 +101,7 @@ fn scan_internal_general_entities(input: &str) -> Option<(usize, HashMap<String,
     }
     let subset_start = subset_start?;
     let subset = &input[subset_start..];
-    let mut quote = None;
-    let mut depth = 0usize;
-    let mut end = None;
-    for (index, character) in subset.char_indices() {
-        if let Some(open) = quote {
-            if character == open {
-                quote = None;
-            }
-            continue;
-        }
-        match character {
-            '"' | '\'' => quote = Some(character),
-            '[' => depth += 1,
-            ']' => {
-                if depth == 0 {
-                    end = Some(index);
-                    break;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-    let end = end?;
+    let end = find_subset_end(subset)?;
     let after_bracket = subset_start + end + 1;
     let mut body_start = after_bracket;
     while body_start < input.len() {
@@ -106,6 +121,56 @@ fn scan_internal_general_entities(input: &str) -> Option<(usize, HashMap<String,
     ))
 }
 
+/// Finds the `]` ending the internal subset, skipping quoted literals,
+/// comments, and processing instructions. The first `]` outside those ends
+/// the subset; `[` nesting is not tracked (internal-subset markup cannot
+/// contain a bare `[` outside a literal).
+fn find_subset_end(subset: &str) -> Option<usize> {
+    let bytes = subset.as_bytes();
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if subset[i..].starts_with("<!--") {
+            match subset[i..].find("-->") {
+                Some(end) => {
+                    i += end + 3;
+                    continue;
+                }
+                None => return None,
+            }
+        }
+        if subset[i..].starts_with("<?") {
+            match subset[i..].find("?>") {
+                Some(end) => {
+                    i += end + 2;
+                    continue;
+                }
+                None => return None,
+            }
+        }
+        if b == b']' {
+            return Some(i);
+        }
+        // Advance by char to stay on UTF-8 boundaries.
+        let ch_len = subset[i..].chars().next().map_or(1, |c| c.len_utf8());
+        i += ch_len;
+    }
+    None
+}
+
 fn parse_internal_general_entities(subset: &str) -> HashMap<String, String> {
     let mut entities = HashMap::new();
     let mut pos = 0;
@@ -118,13 +183,32 @@ fn parse_internal_general_entities(subset: &str) -> HashMap<String, String> {
             }
             continue;
         }
-        if let Some(decl) = rest.strip_prefix("<!ENTITY") {
-            let (consumed, entity) = parse_general_entity_decl(decl);
+        if rest.starts_with("<?") {
+            match rest.find("?>") {
+                Some(end) => pos += end + 2,
+                None => break,
+            }
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("<!ENTITY") {
+            // `S` is required after the keyword; `<!ENTITYfoo>` is not a
+            // declaration (<https://www.w3.org/TR/xml/#sec-entity-decl>).
+            // `%` introduces a parameter entity, which we skip.
+            match after.chars().next() {
+                Some(c) if is_xml_whitespace(c) || c == '%' => {}
+                _ => {
+                    pos += skip_markup(rest);
+                    continue;
+                }
+            }
+            let (consumed, entity) = parse_general_entity_decl(after);
             if let Some((name, value)) = entity {
-                // Beyond the cap further declarations are ignored: their
-                // references stay literal, exactly like undefined entities.
+                // First declaration wins
+                // (<https://www.w3.org/TR/xml/#sec-entity-decl>). Beyond the
+                // cap further declarations are ignored: their references stay
+                // literal, exactly like undefined entities.
                 if entities.len() < MAX_ENTITY_DECLS {
-                    entities.insert(name, value);
+                    entities.entry(name).or_insert(value);
                 }
             }
             pos += "<!ENTITY".len() + consumed;
@@ -166,7 +250,24 @@ fn parse_general_entity_decl(decl: &str) -> (usize, Option<(String, String)>) {
     while chars.peek().is_some_and(|c| is_xml_whitespace(*c)) {
         chars.next();
     }
-    if matches!(chars.peek(), Some('S' | 'P')) {
+    // External IDs start with the SYSTEM/PUBLIC keywords; anything else must
+    // be the quoted internal value
+    // (<https://www.w3.org/TR/xml/#sec-entity-decl>).
+    let rest: String = chars.clone().collect();
+    if rest.starts_with("SYSTEM")
+        && rest["SYSTEM".len()..]
+            .chars()
+            .next()
+            .is_none_or(is_xml_whitespace)
+    {
+        return (consumed, None);
+    }
+    if rest.starts_with("PUBLIC")
+        && rest["PUBLIC".len()..]
+            .chars()
+            .next()
+            .is_none_or(is_xml_whitespace)
+    {
         return (consumed, None);
     }
     let Some(quote) = chars.next() else {
@@ -178,6 +279,16 @@ fn parse_general_entity_decl(decl: &str) -> (usize, Option<(String, String)>) {
     let mut value = String::new();
     for c in chars.by_ref() {
         if c == quote {
+            // An unparsed (`NDATA`) entity is not an internal general entity:
+            // trailing content after the literal (beyond the `>` terminator)
+            // disqualifies it
+            // (<https://www.w3.org/TR/xml/#sec-entity-decl>).
+            let trailing: String = chars.clone().collect();
+            let trailing = trailing.trim_start_matches(is_xml_whitespace);
+            let trailing = trailing.strip_suffix('>').unwrap_or(trailing).trim_end_matches(is_xml_whitespace);
+            if !trailing.is_empty() {
+                return (consumed, None);
+            }
             return (consumed, Some((name, value)));
         }
         value.push(c);
@@ -187,9 +298,13 @@ fn parse_general_entity_decl(decl: &str) -> (usize, Option<(String, String)>) {
 
 /// Copies `text` into `output` while budget remains. Returns false when the
 /// budget ran out, telling the caller to copy the rest literally and stop
-/// expanding.
+/// expanding. `take` is floored to a char boundary so multi-byte text near
+/// exhaustion cannot panic.
 fn push_budgeted(output: &mut String, text: &str, budget: &mut usize) -> bool {
-    let take = (*budget).min(text.len());
+    let mut take = (*budget).min(text.len());
+    while take > 0 && !text.is_char_boundary(take) {
+        take -= 1;
+    }
     output.push_str(&text[..take]);
     *budget -= take;
     take == text.len()
@@ -200,6 +315,7 @@ fn expand_content(
     entities: &HashMap<String, String>,
     output: &mut String,
     budget: &mut usize,
+    errors: &mut Vec<String>,
 ) {
     let mut pos = 0;
     while pos < content.len() {
@@ -207,20 +323,24 @@ fn expand_content(
         if rest.starts_with("<!--")
             || rest.starts_with("<![CDATA[")
             || rest.starts_with("<?")
-            || rest.starts_with('<')
         {
             let consumed = if rest.starts_with("<!--") {
                 rest.find("-->").map_or(rest.len(), |end| end + 3)
             } else if rest.starts_with("<![CDATA[") {
                 rest.find("]]>").map_or(rest.len(), |end| end + 3)
-            } else if rest.starts_with("<?") {
-                rest.find("?>").map_or(rest.len(), |end| end + 2)
             } else {
-                skip_markup(rest)
+                rest.find("?>").map_or(rest.len(), |end| end + 2)
             };
             if !push_budgeted(output, &rest[..consumed], budget) {
-                // Budget gone: the rest of the document passes through
-                // unexpanded rather than growing without bound.
+                output.push_str(&content[pos + consumed..]);
+                return;
+            }
+            pos += consumed;
+            continue;
+        }
+        if rest.starts_with('<') {
+            let consumed = skip_markup(rest);
+            if !expand_tag(&rest[..consumed], entities, output, budget, errors) {
                 output.push_str(&content[pos + consumed..]);
                 return;
             }
@@ -228,9 +348,14 @@ fn expand_content(
             continue;
         }
         if rest.starts_with('&') {
-            if let Some(consumed) = expand_entity_ref(rest, entities, output, budget, 0) {
+            if let Some(consumed) =
+                expand_entity_ref(rest, entities, output, budget, errors, 0)
+            {
                 pos += consumed;
             } else {
+                // Malformed references stay literal here; the XML tokenizer's
+                // char-ref path reports the well-formedness error downstream.
+                // Undefined valid-shaped `&name;` already pushed an error.
                 if !push_budgeted(output, "&", budget) {
                     output.push_str(&content[pos + 1..]);
                     return;
@@ -248,11 +373,63 @@ fn expand_content(
     }
 }
 
+/// Copies a tag verbatim while expanding entity references inside quoted
+/// attribute values (<https://www.w3.org/TR/xml/#AVNormalize>). Markup in
+/// replacement text is *not* re-tokenized here: attribute values cannot
+/// contain `<` (<https://www.w3.org/TR/xml/#forbidden>), and a `<`-bearing
+/// value stays literal for the tokenizer to reject. Returns false when the
+/// budget ran out.
+fn expand_tag(
+    tag: &str,
+    entities: &HashMap<String, String>,
+    output: &mut String,
+    budget: &mut usize,
+    errors: &mut Vec<String>,
+) -> bool {
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    let mut text_start = 0;
+    while i < tag.len() {
+        let rest = &tag[i..];
+        let c = rest.chars().next().unwrap();
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == '&' {
+                if !push_budgeted(output, &tag[text_start..i], budget) {
+                    return false;
+                }
+                if let Some(consumed) =
+                    expand_entity_ref(rest, entities, output, budget, errors, 0)
+                {
+                    i += consumed;
+                    text_start = i;
+                    continue;
+                }
+                if !push_budgeted(output, "&", budget) {
+                    return false;
+                }
+                i += 1;
+                text_start = i;
+                continue;
+            }
+            i += c.len_utf8();
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+        }
+        i += c.len_utf8();
+    }
+    push_budgeted(output, &tag[text_start..], budget)
+}
+
 fn expand_entity_ref(
     rest: &str,
     entities: &HashMap<String, String>,
     output: &mut String,
     budget: &mut usize,
+    errors: &mut Vec<String>,
     depth: usize,
 ) -> Option<usize> {
     let body = rest.strip_prefix('&')?;
@@ -264,10 +441,21 @@ fn expand_entity_ref(
     if !is_valid_name(name) {
         return None;
     }
-    let value = entities.get(name)?.clone();
+    if is_predefined_entity(name) {
+        return None;
+    }
+    let Some(value) = entities.get(name).cloned() else {
+        // Undeclared general entity: well-formedness violation, fail closed
+        // (<https://www.w3.org/TR/xml/#sec-references>).
+        errors.push(format!("undefined entity &{name};"));
+        return None;
+    };
+    // Each top-level reference gets a fresh cycle set; it guards only within
+    // one expansion, so diamond (non-cyclic) sharing across siblings
+    // re-expands from scratch and the output budget (not `seen`) bounds it.
     let mut seen = HashSet::new();
     seen.insert(name.to_owned());
-    expand_replacement(&value, entities, output, budget, &mut seen, depth);
+    expand_replacement(&value, entities, output, budget, errors, &mut seen, depth);
     Some(name_end + 2)
 }
 
@@ -276,6 +464,7 @@ fn expand_replacement(
     entities: &HashMap<String, String>,
     output: &mut String,
     budget: &mut usize,
+    errors: &mut Vec<String>,
     seen: &mut HashSet<String>,
     depth: usize,
 ) {
@@ -293,7 +482,7 @@ fn expand_replacement(
             }
             let ref_rest = &rest[amp..];
             if let Some(consumed) =
-                expand_nested_ref(ref_rest, entities, output, budget, seen, depth)
+                expand_nested_ref(ref_rest, entities, output, budget, errors, seen, depth)
             {
                 pos += amp + consumed;
             } else {
@@ -314,6 +503,7 @@ fn expand_nested_ref(
     entities: &HashMap<String, String>,
     output: &mut String,
     budget: &mut usize,
+    errors: &mut Vec<String>,
     seen: &mut HashSet<String>,
     depth: usize,
 ) -> Option<usize> {
@@ -328,16 +518,22 @@ fn expand_nested_ref(
     // expansion also costs traversal work (HashSet insert/remove plus string
     // allocation per reference), so every expansion prepays a flat overhead:
     // without it an attacker trades bounded output for unbounded CPU.
-    if *budget == 0
-        || depth >= MAX_ENTITY_DEPTH
-        || !is_valid_name(name)
-        || !seen.insert(name.to_owned())
-    {
+    if *budget == 0 || depth >= MAX_ENTITY_DEPTH || !is_valid_name(name) {
+        return None;
+    }
+    if is_predefined_entity(name) {
+        return None;
+    }
+    let Some(value) = entities.get(name).cloned() else {
+        errors.push(format!("undefined entity &{name};"));
+        return None;
+    };
+    if !seen.insert(name.to_owned()) {
+        errors.push(format!("cyclic entity &{name};"));
         return None;
     }
     *budget = budget.saturating_sub(MAX_ENTITY_OVERHEAD);
-    let value = entities.get(name)?.clone();
-    expand_replacement(&value, entities, output, budget, seen, depth + 1);
+    expand_replacement(&value, entities, output, budget, errors, seen, depth + 1);
     seen.remove(name);
     Some(name_end + 2)
 }
@@ -382,6 +578,12 @@ fn is_xml_whitespace(character: char) -> bool {
     matches!(character, ' ' | '\t' | '\r' | '\n')
 }
 
+/// Predefined XML entities handled by the tokenizer's char-ref path, not by
+/// general-entity expansion (<https://www.w3.org/TR/xml/#sec-predefined-ent>).
+fn is_predefined_entity(name: &str) -> bool {
+    matches!(name, "amp" | "lt" | "gt" | "apos" | "quot")
+}
+
 /// Whether `name` matches the XML `Name` production
 /// (<https://www.w3.org/TR/xml/#NT-Name>).
 fn is_valid_name(name: &str) -> bool {
@@ -406,7 +608,11 @@ fn is_name_char(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_EXPANDED_BYTES, expand_internal_general_entities};
+    use super::{MAX_EXPANDED_BYTES, expand_internal_general_entities_with_errors};
+
+    fn expand(input: &str) -> String {
+        expand_internal_general_entities_with_errors(input).0.into_owned()
+    }
 
     fn doctype_with(decls: &str, body: &str) -> String {
         format!("<!DOCTYPE r [{decls}]><r>{body}</r>")
@@ -415,11 +621,65 @@ mod tests {
     #[test]
     fn legitimate_entities_still_expand() {
         let input = doctype_with("<!ENTITY name \"world\">", "hello &name;!");
-        let expanded = expand_internal_general_entities(&input);
+        let expanded = expand(&input);
         assert!(
             expanded.contains("hello world!"),
             "unexpected expansion: {expanded:?}"
         );
+    }
+
+    #[test]
+    fn attribute_value_entities_expand() {
+        let input = doctype_with("<!ENTITY a \"X\">", "<r attr=\"&a;\"/>");
+        let expanded = expand(&input);
+        assert!(
+            expanded.contains("attr=\"X\""),
+            "attribute value not expanded: {expanded:?}"
+        );
+    }
+
+    #[test]
+    fn first_declaration_wins() {
+        let input = doctype_with(
+            "<!ENTITY a \"1\"><!ENTITY a \"2\">",
+            "&a;",
+        );
+        let expanded = expand(&input);
+        assert!(
+            expanded.contains(">1<"),
+            "last-wins, expected first: {expanded:?}"
+        );
+    }
+
+    #[test]
+    fn ndata_entities_do_not_expand() {
+        let input = doctype_with("<!ENTITY logo \"x\" NDATA png>", "&logo;");
+        let expanded = expand(&input);
+        assert!(
+            expanded.contains("&logo;"),
+            "unparsed entity expanded: {expanded:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_entities_report_errors() {
+        let input = doctype_with("", "&nosuch;");
+        let (expanded, errors) =
+            super::expand_internal_general_entities_with_errors(&input);
+        assert!(expanded.contains("&nosuch;"));
+        assert!(
+            errors.iter().any(|e| e.contains("nosuch")),
+            "missing undefined-entity error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn multibyte_tail_does_not_panic() {
+        let input = doctype_with("<!ENTITY a \"é\">", "&a;");
+        let mut out = String::new();
+        let mut budget = 1;
+        assert!(!super::push_budgeted(&mut out, "éé", &mut budget));
+        let _ = input;
     }
 
     #[test]
@@ -428,7 +688,7 @@ mod tests {
             "<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">",
             "&a;",
         );
-        let expanded = expand_internal_general_entities(&input);
+        let expanded = expand(&input);
         assert!(
             expanded.len() < 1024,
             "cycle exploded: {} bytes",
@@ -450,7 +710,7 @@ mod tests {
         }
         let input = doctype_with(&decls, "&a29;");
         let start = std::time::Instant::now();
-        let expanded = expand_internal_general_entities(&input);
+        let expanded = expand(&input);
         let elapsed = start.elapsed();
         assert!(
             expanded.len() <= input.len() + MAX_EXPANDED_BYTES,

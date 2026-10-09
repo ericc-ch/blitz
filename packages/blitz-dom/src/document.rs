@@ -336,12 +336,13 @@ pub struct BaseDocument {
     // keyed by request id
     pub(crate) pending_critical_resources: HashSet<usize>,
 
-    /// Parse errors reported by the HTML/XML sink since the last drain, in
-    /// report order. HTML parsing is error-tolerant so these are
-    /// informational; XML consumers drain them to decide `parsererror`
-    /// documents. Kept here (rather than on the transient sink) so the
-    /// parsed document carries its own errors.
-    pub parse_errors: Vec<String>,
+    /// Parse errors reported by the XML sink since the last drain, in
+    /// report order. Only XML pushes here (HTML fragment parses share a live
+    /// document and must not accumulate); XML consumers drain via
+    /// [`Self::take_parse_errors`] to decide `parsererror` documents. Kept
+    /// here (rather than on the transient sink) so the parsed document
+    /// carries its own errors.
+    parse_errors: Vec<String>,
 
     // Service providers
     /// Network provider. Can be used to fetch assets.
@@ -1066,20 +1067,27 @@ impl BaseDocument {
             NodeData::Element(elem) => elem.template_contents,
             _ => None,
         };
-        if let Some(old_contents) = old_contents
-            && self.get_node(old_contents).is_some()
-        {
-            let new_contents = self.deep_clone_node(old_contents);
-            if let Some(data) = self.nodes[new_node_id]
+        if let Some(old_contents) = old_contents {
+            if self.get_node(old_contents).is_some() {
+                let new_contents = self.deep_clone_node(old_contents);
+                if let Some(data) = self.nodes[new_node_id]
+                    .data
+                    .downcast_element_mut()
+                {
+                    data.template_contents = Some(new_contents);
+                }
+                if let Some(NodeData::Fragment { host }) =
+                    self.nodes.get_mut(new_contents).map(|node| &mut node.data)
+                {
+                    *host = Some(new_node_id);
+                }
+            } else if let Some(data) = self.nodes[new_node_id]
                 .data
                 .downcast_element_mut()
             {
-                data.template_contents = Some(new_contents);
-            }
-            if let Some(NodeData::Fragment { host }) =
-                self.nodes.get_mut(new_contents).map(|node| &mut node.data)
-            {
-                *host = Some(new_node_id);
+                // Original fragment is gone: clear the stale id rather than
+                // pointing at a dead node.
+                data.template_contents = None;
             }
         }
 
@@ -1115,6 +1123,13 @@ impl BaseDocument {
                 for &anon_id in &node.anonymous_blocks {
                     doc.deallocate_anonymous_block(anon_id);
                 }
+                // A dropped template element takes its contents fragment with
+                // it, like `drop_node_ignoring_parent_with`.
+                if let NodeData::Element(element) = &node.data
+                    && let Some(contents) = element.template_contents
+                {
+                    remove_pe_ignoring_parent(doc, contents);
+                }
             }
             node
         }
@@ -1134,8 +1149,10 @@ impl BaseDocument {
     /// be resolved (for example a relative reference against a `data:` base,
     /// which has no host or path to resolve against). Callers skip the fetch
     /// or fall back to a same-document reference instead of panicking: an
-    /// unresolvable URL in markup must never crash the engine.
-    pub(crate) fn resolve_url(&self, raw: &str) -> Option<url::Url> {
+    /// unresolvable URL in markup must never crash the engine. Tinybrowser
+    /// reuses this for sub-resource URLs; keep semantics in sync with
+    /// `crates/browser/src/actor.rs` rather than forking resolution.
+    pub fn resolve_url(&self, raw: &str) -> Option<url::Url> {
         self.url.resolve_relative(raw)
     }
 
@@ -1318,6 +1335,12 @@ impl BaseDocument {
     /// means the input was not well-formed.
     pub fn take_parse_errors(&mut self) -> Vec<String> {
         std::mem::take(&mut self.parse_errors)
+    }
+
+    /// Records a sink parse error on the document. XML sinks call this;
+    /// HTML fragment sinks must not (they share a live document).
+    pub fn push_parse_error(&mut self, msg: String) {
+        self.parse_errors.push(msg);
     }
 
     pub fn load_resource(&mut self, res: ResourceLoadResponse) {

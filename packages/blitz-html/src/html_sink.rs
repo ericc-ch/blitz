@@ -1,4 +1,9 @@
 //! An implementation for Html5ever's sink trait, allowing us to parse HTML into a DOM.
+//!
+//! Note: the XML path (`XmlTreeSink`) resolves only against the `ericc-ch/html5ever`
+//! fork, wired in by tinybrowser's `[patch.crates-io]`. A standalone build of
+//! this fork against registry `xml5ever` (which has no `XmlTreeSink`) fails;
+//! build and test it through the tinybrowser workspace.
 
 use html5ever::ParseOpts;
 use html5ever::tokenizer::TokenizerOpts;
@@ -55,12 +60,6 @@ pub struct DocumentHtmlParser<'m, 'doc> {
     /// The document's quirks mode.
     pub quirks_mode: Cell<QuirksMode>,
     pub is_xml: bool,
-
-    /// Processing instructions that must not enter the tree: the XML
-    /// declaration (`<?xml ...?>`) is prolog, not a node
-    /// (<https://www.w3.org/TR/xml/#sec-prolog-dtd>). They are created so
-    /// `create_pi` can return a handle, then dropped by `append`.
-    skipped_pis: RefCell<Vec<NodeId>>,
 }
 
 impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
@@ -78,7 +77,6 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             errors: RefCell::new(Vec::new()),
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             is_xml: false,
-            skipped_pis: RefCell::new(Vec::new()),
         }
     }
 
@@ -141,7 +139,11 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         // Internal general entities are not part of any parser's token
         // stream: expand the internal subset up front, bounded against
         // billion laughs (see `entity`).
-        let expanded = crate::entity::expand_internal_general_entities(xml);
+        let (expanded, entity_errors) =
+            crate::entity::expand_internal_general_entities_with_errors(xml);
+        for error in entity_errors {
+            sink.parse_error(Cow::Owned(error));
+        }
         xml5ever::driver::parse_document(sink, Default::default())
             .from_utf8()
             .read_from(&mut expanded.as_bytes())
@@ -180,15 +182,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         let fragment_root_id = mutr.last_child_id(document_id).unwrap();
         let child_ids = mutr.child_ids(fragment_root_id);
         let destination = {
-            let is_template = mutr
-                .doc
-                .get_node(element_id)
-                .and_then(|node| node.data.downcast_element())
-                .is_some_and(|element| {
-                    element.name.ns == markup5ever::ns!(html)
-                        && element.name.local.as_ref() == "template"
-                });
-            if is_template {
+            if mutr.is_template_element(element_id) {
                 mutr.ensure_template_contents(element_id)
             } else {
                 element_id
@@ -209,10 +203,16 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         })
     }
 
-    /// Whether `id` is a skipped XML declaration that must not enter the
-    /// tree.
-    fn is_skipped_pi(&self, id: &NodeId) -> bool {
-        self.skipped_pis.borrow().contains(id)
+    /// Whether the document already has a doctype child: DOM permits at most
+    /// one (<https://dom.spec.whatwg.org/#concept-node-ensure-pre-insert-validity>).
+    fn document_has_doctype(&self) -> bool {
+        let mutr = self.mutr();
+        let root = mutr.doc.root_node().id;
+        mutr.child_ids(root).iter().any(|child| {
+            mutr.doc.get_node(*child).is_some_and(|node| {
+                matches!(node.data, blitz_dom::NodeData::Doctype { .. })
+            })
+        })
     }
 }
 
@@ -236,10 +236,12 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
 
     fn parse_error(&self, msg: Cow<'static, str>) {
         self.errors.borrow_mut().push(msg.clone());
-        self.mutr()
-            .doc
-            .parse_errors
-            .push(msg.into_owned());
+        // Only XML documents drain into `parsererror`: HTML fragment parses
+        // (`innerHTML`) share a live document whose error store must not grow
+        // across parses.
+        if self.is_xml {
+            self.mutr().doc.push_parse_error(msg.into_owned());
+        }
     }
 
     fn get_document(&self) -> Self::Handle {
@@ -271,22 +273,23 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         // The XML declaration looks like a PI to the tokenizer but is not
         // a node. It only occurs before the document element, so a later
         // `<?xml?>` (malformed input with a reserved target) stays a real
-        // PI (<https://www.w3.org/TR/xml/#sec-prolog-dtd>).
-        if target.as_ref() == "xml" && !self.document_has_element() {
-            let pi = self
-                .mutr()
-                .create_processing_instruction_node(&target, &data);
-            self.skipped_pis.borrow_mut().push(pi);
-            return pi;
+        // PI (<https://www.w3.org/TR/xml/#sec-prolog-dtd>). `[Xx][Mm][Ll]`
+        // targets are reserved (<https://www.w3.org/TR/xml#sec-pi>), so any
+        // case variant before the root is prolog, not a node. Returns the
+        // document as a sentinel (never appended: it is the root, not a
+        // child) instead of allocating a node just to drop it.
+        if target.eq_ignore_ascii_case("xml") && !self.document_has_element() {
+            return self.get_document();
         }
         self.mutr()
             .create_processing_instruction_node(&target, &data)
     }
 
     fn append(&self, parent_id: &Self::Handle, child: NodeOrText<Self::Handle>) {
+        let document = self.get_document();
         match child {
             NodeOrText::AppendNode(id) => {
-                if self.is_skipped_pi(&id) {
+                if id == document {
                     return;
                 }
                 self.mutr().append_children(*parent_id, &[id])
@@ -311,9 +314,10 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     // Note: The tree builder promises we won't have a text node after the insertion point.
     // https://github.com/servo/html5ever/blob/main/rcdom/lib.rs#L338
     fn append_before_sibling(&self, sibling_id: &Self::Handle, new_node: NodeOrText<Self::Handle>) {
+        let document = self.get_document();
         match new_node {
             NodeOrText::AppendNode(id) => {
-                if self.is_skipped_pi(&id) {
+                if id == document {
                     return;
                 }
                 self.mutr().insert_nodes_before(*sibling_id, &[id])
@@ -357,6 +361,13 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     ) {
         // The doctype is a real child of the document
         // (<https://html.spec.whatwg.org/multipage/parsing.html#the-initial-insertion-mode>).
+        // DOM permits at most one doctype child: the parser calls once, but
+        // guard so a second never lands in the tree
+        // (<https://dom.spec.whatwg.org/#concept-node-ensure-pre-insert-validity>).
+        if self.document_has_doctype() {
+            debug_assert!(false, "second doctype ignored");
+            return;
+        }
         let doctype = self
             .mutr()
             .create_doctype_node(&name, &public_id, &system_id);

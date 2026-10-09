@@ -405,9 +405,11 @@ impl Node {
             .unwrap_or(false)
     }
 
-    /// Whether the node is visible per its computed `visibility`. Nodes
-    /// without computed styles (text, comments, unstyled subtrees) count as
-    /// visible.
+    /// Whether the node is visible per its computed `visibility` longhand
+    /// only (not `display`: `display:none` boxes are zero-area and never
+    /// contain a point, which is what the sole `element_at_point` caller
+    /// relies on). Nodes without computed styles (text, comments, unstyled
+    /// subtrees) count as visible.
     pub fn is_visible(&self) -> bool {
         self.primary_styles().is_none_or(|styles| {
             use style::properties::generated::longhands::visibility::computed_value::T as Visibility;
@@ -765,10 +767,12 @@ pub enum NodeData {
     /// Template contents fragments live here, detached from the document
     /// tree and referenced by their host element's `template_contents`
     /// slot (<https://dom.spec.whatwg.org/#interface-documentfragment>).
-    /// `host` is the template element for template contents, if any: cycle
-    /// checks treat the fragment as a child of its host (host-including
-    /// inclusive ancestry,
-    /// <https://dom.spec.whatwg.org/#concept-tree-host-including-inclusive-ancestor>).
+    /// `host` is the template element for template contents, if any.
+    /// Cycle checks treating the fragment as a child of its host are
+    /// enforced tinybrowser-side (see `ensure_no_cycle` in
+    /// `crates/renderer/src/js/bindings/node.rs`), not in this crate; the
+    /// link here is the host-including ancestry input
+    /// (<https://dom.spec.whatwg.org/#concept-tree-host-including-inclusive-ancestor>).
     Fragment {
         /// The template element hosting these contents, if any.
         host: Option<NodeId>,
@@ -1002,7 +1006,7 @@ impl Node {
                     }
                 }
                 write!(s, "> ({display})")
-            } // NodeData::ProcessingInstruction { .. } => write!(s, "ProcessingInstruction"),
+            }
         }
         .unwrap();
         s
@@ -1068,10 +1072,16 @@ impl Node {
             } => {
                 writer.push_str("<!DOCTYPE ");
                 writer.push_str(name);
-                if !public_id.is_empty() || !system_id.is_empty() {
+                // PUBLIC needs both ids, SYSTEM needs only the system id
+                // (<https://dom.spec.whatwg.org/#concept-xml-serialization-algorithm>).
+                if !public_id.is_empty() && !system_id.is_empty() {
                     writer.push_str(" PUBLIC \"");
                     writer.push_str(public_id);
                     writer.push_str("\" \"");
+                    writer.push_str(system_id);
+                    writer.push('"');
+                } else if !system_id.is_empty() {
+                    writer.push_str(" SYSTEM \"");
                     writer.push_str(system_id);
                     writer.push('"');
                 }

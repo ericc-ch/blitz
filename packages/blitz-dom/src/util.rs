@@ -137,11 +137,6 @@ pub fn walk_tree(indent: usize, node: &Node) {
                 println!("/>");
             }
         } // NodeData::Doctype {
-          //     ref name,
-          //     ref public_id,
-          //     ref system_id,
-          // } => println!("<!DOCTYPE {} \"{}\" \"{}\">", name, public_id, system_id),
-          // NodeData::ProcessingInstruction { .. } => unreachable!(),
         NodeData::Doctype {
             name,
             public_id,
