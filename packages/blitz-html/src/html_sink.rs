@@ -54,6 +54,12 @@ pub struct DocumentHtmlParser<'m, 'doc> {
     /// The document's quirks mode.
     pub quirks_mode: Cell<QuirksMode>,
     pub is_xml: bool,
+
+    /// Processing instructions that must not enter the tree: the XML
+    /// declaration (`<?xml ...?>`) is prolog, not a node
+    /// (<https://www.w3.org/TR/xml/#sec-prolog-dtd>). They are created so
+    /// `create_pi` can return a handle, then dropped by `append`.
+    skipped_pis: RefCell<Vec<NodeId>>,
 }
 
 impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
@@ -71,6 +77,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             errors: RefCell::new(Vec::new()),
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             is_xml: false,
+            skipped_pis: RefCell::new(Vec::new()),
         }
     }
 
@@ -166,6 +173,23 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         mutr.append_children(element_id, &child_ids);
         mutr.remove_and_drop_node(fragment_root_id);
     }
+
+    /// Whether the document already has a document element child.
+    fn document_has_element(&self) -> bool {
+        let mutr = self.mutr();
+        let root = mutr.doc.root_node().id;
+        mutr.child_ids(root).iter().any(|child| {
+            mutr.doc
+                .get_node(*child)
+                .is_some_and(|node| node.data.downcast_element().is_some())
+        })
+    }
+
+    /// Whether `id` is a skipped XML declaration that must not enter the
+    /// tree.
+    fn is_skipped_pi(&self, id: &NodeId) -> bool {
+        self.skipped_pis.borrow().contains(id)
+    }
 }
 
 impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
@@ -216,13 +240,29 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     }
 
     fn create_pi(&self, target: StrTendril, data: StrTendril) -> Self::Handle {
+        // The XML declaration looks like a PI to the tokenizer but is not
+        // a node. It only occurs before the document element, so a later
+        // `<?xml?>` (malformed input with a reserved target) stays a real
+        // PI (<https://www.w3.org/TR/xml/#sec-prolog-dtd>).
+        if target.as_ref() == "xml" && !self.document_has_element() {
+            let pi = self
+                .mutr()
+                .create_processing_instruction_node(&target, &data);
+            self.skipped_pis.borrow_mut().push(pi);
+            return pi;
+        }
         self.mutr()
             .create_processing_instruction_node(&target, &data)
     }
 
     fn append(&self, parent_id: &Self::Handle, child: NodeOrText<Self::Handle>) {
         match child {
-            NodeOrText::AppendNode(id) => self.mutr().append_children(*parent_id, &[id]),
+            NodeOrText::AppendNode(id) => {
+                if self.is_skipped_pi(&id) {
+                    return;
+                }
+                self.mutr().append_children(*parent_id, &[id])
+            }
             // If content to append is text, first attempt to append it to the last child of parent.
             // Else create a new text node and append it to the parent
             NodeOrText::AppendText(text) => {
@@ -244,7 +284,12 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     // https://github.com/servo/html5ever/blob/main/rcdom/lib.rs#L338
     fn append_before_sibling(&self, sibling_id: &Self::Handle, new_node: NodeOrText<Self::Handle>) {
         match new_node {
-            NodeOrText::AppendNode(id) => self.mutr().insert_nodes_before(*sibling_id, &[id]),
+            NodeOrText::AppendNode(id) => {
+                if self.is_skipped_pi(&id) {
+                    return;
+                }
+                self.mutr().insert_nodes_before(*sibling_id, &[id])
+            }
             // If content to append is text, first attempt to append it to the node before sibling_node
             // Else create a new text node and insert it before sibling_node
             NodeOrText::AppendText(text) => {
