@@ -230,7 +230,11 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     }
 
     fn parse_error(&self, msg: Cow<'static, str>) {
-        self.errors.borrow_mut().push(msg);
+        self.errors.borrow_mut().push(msg.clone());
+        self.mutr()
+            .doc
+            .parse_errors
+            .push(msg.into_owned());
     }
 
     fn get_document(&self) -> Self::Handle {

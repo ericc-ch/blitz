@@ -336,6 +336,13 @@ pub struct BaseDocument {
     // keyed by request id
     pub(crate) pending_critical_resources: HashSet<usize>,
 
+    /// Parse errors reported by the HTML/XML sink since the last drain, in
+    /// report order. HTML parsing is error-tolerant so these are
+    /// informational; XML consumers drain them to decide `parsererror`
+    /// documents. Kept here (rather than on the transient sink) so the
+    /// parsed document carries its own errors.
+    pub parse_errors: Vec<String>,
+
     // Service providers
     /// Network provider. Can be used to fetch assets.
     pub net_provider: Arc<dyn NetProvider>,
@@ -500,6 +507,7 @@ impl BaseDocument {
             pending_images: HashMap::new(),
             pending_style_image_nodes: Vec::new(),
             pending_critical_resources: HashSet::new(),
+            parse_errors: Vec::new(),
             controls_to_form: HashMap::new(),
             net_provider,
             navigation_provider,
@@ -1303,6 +1311,13 @@ impl BaseDocument {
     /// Whether the Document has pending requests for "critical" resources (that should block rendering)
     pub fn has_pending_critical_resources(&self) -> bool {
         !self.pending_critical_resources.is_empty()
+    }
+
+    /// Drains the parse errors reported since the last drain, in report
+    /// order. XML consumers call this after parsing: a non-empty result
+    /// means the input was not well-formed.
+    pub fn take_parse_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.parse_errors)
     }
 
     pub fn load_resource(&mut self, res: ResourceLoadResponse) {
