@@ -1054,7 +1054,9 @@ impl<'doc> DocumentMutator<'doc> {
             return;
         }
 
-        let url = self.doc.resolve_url(href);
+        let Some(url) = self.doc.resolve_url(href) else {
+            return;
+        };
         let handler = ResourceHandler::new(
             self.doc.tx.clone(),
             self.doc.id(),
@@ -1103,7 +1105,9 @@ impl<'doc> DocumentMutator<'doc> {
         let node = &self.doc.nodes[target_id];
         if let Some(raw_src) = node.attr(local_name!("src")) {
             if !raw_src.is_empty() {
-                let src = self.doc.resolve_url(raw_src);
+                let Some(src) = self.doc.resolve_url(raw_src) else {
+                    return;
+                };
                 let src_string = src.as_str();
 
                 // Check cache first
