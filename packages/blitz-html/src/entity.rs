@@ -13,9 +13,13 @@
 //! Declaration count caps HashMap memory; depth caps the call stack
 //! (`expand_replacement` recurses per nesting level); the byte budget caps
 //! total output (a doubling chain otherwise turns kilobytes into gigabytes).
-//! Exhaustion surfaces one parse error and leaves the rest literal so the
-//! document fails closed into a `parsererror` instead of a silently wrong
-//! tree.
+//! Exhaustion of any of the three surfaces a parse error and leaves the
+//! rest literal so the document fails closed into a `parsererror` instead
+//! of a silently wrong tree.
+//!
+//! Only the first error is recorded: one is enough to fail the document,
+//! and a body of a million undefined references must not allocate a
+//! million messages.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -47,25 +51,55 @@ pub(crate) fn expand_internal_general_entities_with_errors(
         &mut budget,
         &mut errors,
     );
-    if budget == 0 && !errors.iter().any(|e| e.contains("budget")) {
-        errors.push("entity expansion budget exhausted".to_string());
+    if budget == 0 {
+        report(
+            &mut errors,
+            format_args!("entity expansion budget exhausted"),
+        );
     }
     (Cow::Owned(output), errors)
 }
 
-fn find_doctype_keyword(input: &str) -> Option<usize> {
-    // Case-insensitive to match the tokenizer's `eat` (which uses
-    // `eq_ignore_ascii_case`): the XML spec wants uppercase-only
-    // `DOCTYPE` (<https://www.w3.org/TR/xml/#NT-doctypedecl>), but both
-    // layers stay lenient together so entity expansion and tokenizing agree.
-    let upper = "<!DOCTYPE";
-    if input.len() < upper.len() {
-        return None;
+/// Records `message` unless an earlier error already failed the document.
+fn report(errors: &mut Vec<String>, message: std::fmt::Arguments<'_>) {
+    if errors.is_empty() {
+        errors.push(message.to_string());
     }
-    input
-        .as_bytes()
-        .windows(upper.len())
-        .position(|w| w.eq_ignore_ascii_case(upper.as_bytes()))
+}
+
+/// The byte offset of the document type declaration's `<!DOCTYPE`, which
+/// may only follow the prolog's optional byte order mark, XML declaration,
+/// comments, processing instructions, and whitespace
+/// (<https://www.w3.org/TR/xml/#NT-prolog>). A `<!DOCTYPE` inside a comment,
+/// a processing instruction, or anywhere after the first other markup is
+/// not a declaration, so it declares no entities.
+///
+/// The keyword matches ASCII case-insensitively to agree with the
+/// tokenizer's `eat` (which uses `eq_ignore_ascii_case`): the XML spec wants
+/// uppercase-only `DOCTYPE`
+/// (<https://www.w3.org/TR/xml/#NT-doctypedecl>), but both layers stay
+/// lenient together so entity expansion and tokenizing agree.
+fn find_doctype_keyword(input: &str) -> Option<usize> {
+    let mut pos = input
+        .strip_prefix('\u{feff}')
+        .map_or(0, |_| '\u{feff}'.len_utf8());
+    loop {
+        let rest = &input[pos..];
+        let markup = rest.trim_start_matches(is_xml_whitespace);
+        pos += rest.len() - markup.len();
+        if let Some(body) = markup.strip_prefix("<!--") {
+            pos += "<!--".len() + body.find("-->")? + "-->".len();
+        } else if let Some(body) = markup.strip_prefix("<?") {
+            pos += "<?".len() + body.find("?>")? + "?>".len();
+        } else if markup
+            .get(.."<!DOCTYPE".len())
+            .is_some_and(|keyword| keyword.eq_ignore_ascii_case("<!DOCTYPE"))
+        {
+            return Some(pos);
+        } else {
+            return None;
+        }
+    }
 }
 
 fn scan_internal_general_entities(input: &str) -> Option<(usize, HashMap<String, String>)> {
@@ -285,7 +319,10 @@ fn parse_general_entity_decl(decl: &str) -> (usize, Option<(String, String)>) {
             // (<https://www.w3.org/TR/xml/#sec-entity-decl>).
             let trailing: String = chars.clone().collect();
             let trailing = trailing.trim_start_matches(is_xml_whitespace);
-            let trailing = trailing.strip_suffix('>').unwrap_or(trailing).trim_end_matches(is_xml_whitespace);
+            let trailing = trailing
+                .strip_suffix('>')
+                .unwrap_or(trailing)
+                .trim_end_matches(is_xml_whitespace);
             if !trailing.is_empty() {
                 return (consumed, None);
             }
@@ -320,10 +357,7 @@ fn expand_content(
     let mut pos = 0;
     while pos < content.len() {
         let rest = &content[pos..];
-        if rest.starts_with("<!--")
-            || rest.starts_with("<![CDATA[")
-            || rest.starts_with("<?")
-        {
+        if rest.starts_with("<!--") || rest.starts_with("<![CDATA[") || rest.starts_with("<?") {
             let consumed = if rest.starts_with("<!--") {
                 rest.find("-->").map_or(rest.len(), |end| end + 3)
             } else if rest.starts_with("<![CDATA[") {
@@ -348,9 +382,7 @@ fn expand_content(
             continue;
         }
         if rest.starts_with('&') {
-            if let Some(consumed) =
-                expand_entity_ref(rest, entities, output, budget, errors, 0)
-            {
+            if let Some(consumed) = expand_entity_ref(rest, entities, output, budget, errors, 0) {
                 pos += consumed;
             } else {
                 // Malformed references stay literal here; the XML tokenizer's
@@ -399,8 +431,7 @@ fn expand_tag(
                 if !push_budgeted(output, &tag[text_start..i], budget) {
                     return false;
                 }
-                if let Some(consumed) =
-                    expand_entity_ref(rest, entities, output, budget, errors, 0)
+                if let Some(consumed) = expand_entity_ref(rest, entities, output, budget, errors, 0)
                 {
                     i += consumed;
                     text_start = i;
@@ -447,7 +478,7 @@ fn expand_entity_ref(
     let Some(value) = entities.get(name).cloned() else {
         // Undeclared general entity: well-formedness violation, fail closed
         // (<https://www.w3.org/TR/xml/#sec-references>).
-        errors.push(format!("undefined entity &{name};"));
+        report(errors, format_args!("undefined entity &{name};"));
         return None;
     };
     // Each top-level reference gets a fresh cycle set; it guards only within
@@ -518,18 +549,22 @@ fn expand_nested_ref(
     // expansion also costs traversal work (HashSet insert/remove plus string
     // allocation per reference), so every expansion prepays a flat overhead:
     // without it an attacker trades bounded output for unbounded CPU.
-    if *budget == 0 || depth >= MAX_ENTITY_DEPTH || !is_valid_name(name) {
+    if *budget == 0 || !is_valid_name(name) || is_predefined_entity(name) {
         return None;
     }
-    if is_predefined_entity(name) {
+    if depth >= MAX_ENTITY_DEPTH {
+        report(
+            errors,
+            format_args!("entity nesting deeper than {MAX_ENTITY_DEPTH} at &{name};"),
+        );
         return None;
     }
     let Some(value) = entities.get(name).cloned() else {
-        errors.push(format!("undefined entity &{name};"));
+        report(errors, format_args!("undefined entity &{name};"));
         return None;
     };
     if !seen.insert(name.to_owned()) {
-        errors.push(format!("cyclic entity &{name};"));
+        report(errors, format_args!("cyclic entity &{name};"));
         return None;
     }
     *budget = budget.saturating_sub(MAX_ENTITY_OVERHEAD);
@@ -611,7 +646,9 @@ mod tests {
     use super::{MAX_EXPANDED_BYTES, expand_internal_general_entities_with_errors};
 
     fn expand(input: &str) -> String {
-        expand_internal_general_entities_with_errors(input).0.into_owned()
+        expand_internal_general_entities_with_errors(input)
+            .0
+            .into_owned()
     }
 
     fn doctype_with(decls: &str, body: &str) -> String {
@@ -640,10 +677,7 @@ mod tests {
 
     #[test]
     fn first_declaration_wins() {
-        let input = doctype_with(
-            "<!ENTITY a \"1\"><!ENTITY a \"2\">",
-            "&a;",
-        );
+        let input = doctype_with("<!ENTITY a \"1\"><!ENTITY a \"2\">", "&a;");
         let expanded = expand(&input);
         assert!(
             expanded.contains(">1<"),
@@ -664,8 +698,7 @@ mod tests {
     #[test]
     fn undefined_entities_report_errors() {
         let input = doctype_with("", "&nosuch;");
-        let (expanded, errors) =
-            super::expand_internal_general_entities_with_errors(&input);
+        let (expanded, errors) = super::expand_internal_general_entities_with_errors(&input);
         assert!(expanded.contains("&nosuch;"));
         assert!(
             errors.iter().any(|e| e.contains("nosuch")),
@@ -674,20 +707,59 @@ mod tests {
     }
 
     #[test]
-    fn multibyte_tail_does_not_panic() {
-        let input = doctype_with("<!ENTITY a \"é\">", "&a;");
+    fn push_budgeted_floors_to_a_char_boundary() {
         let mut out = String::new();
         let mut budget = 1;
         assert!(!super::push_budgeted(&mut out, "éé", &mut budget));
-        let _ = input;
+        assert_eq!(out, "");
+        assert_eq!(budget, 1);
+    }
+
+    fn errors_of(input: &str) -> Vec<String> {
+        super::expand_internal_general_entities_with_errors(input).1
+    }
+
+    #[test]
+    fn nesting_past_the_depth_cap_fails_closed() {
+        let mut decls = String::from("<!ENTITY a0 \"x\">");
+        for level in 1..=super::MAX_ENTITY_DEPTH + 1 {
+            decls.push_str(&format!("<!ENTITY a{level} \"&a{};\">", level - 1));
+        }
+        let top = super::MAX_ENTITY_DEPTH + 1;
+        let errors = errors_of(&doctype_with(&decls, &format!("&a{top};")));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("nesting"), "{errors:?}");
+        let shallow = errors_of(&doctype_with(&decls, "&a3;"));
+        assert!(shallow.is_empty(), "{shallow:?}");
+    }
+
+    #[test]
+    fn only_the_first_error_is_recorded() {
+        let body = "&nosuch;".repeat(10_000);
+        let errors = errors_of(&doctype_with("", &body));
+        assert_eq!(errors, ["undefined entity &nosuch;"]);
+    }
+
+    #[test]
+    fn doctype_inside_a_comment_or_pi_declares_nothing() {
+        for input in [
+            "<!-- <!DOCTYPE r [<!ENTITY a \"X\">]> --><r>&a;</r>",
+            "<?pi <!DOCTYPE r [<!ENTITY a \"X\">]> ?><r>&a;</r>",
+            "<r><!DOCTYPE r [<!ENTITY a \"X\">]>&a;</r>",
+        ] {
+            assert_eq!(expand(input), input);
+        }
+    }
+
+    #[test]
+    fn doctype_after_prolog_markup_still_declares() {
+        let input = "\u{feff}<?xml version=\"1.0\"?>\n<!-- c --><?pi x?> <!doctype r [<!ENTITY a \"X\">]><r>&a;</r>";
+        assert!(expand(input).ends_with("<r>X</r>"), "{}", expand(input));
     }
 
     #[test]
     fn entity_cycles_stay_literal() {
-        let input = doctype_with(
-            "<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">",
-            "&a;",
-        );
+        let input = doctype_with("<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">", "&a;");
         let expanded = expand(&input);
         assert!(
             expanded.len() < 1024,
