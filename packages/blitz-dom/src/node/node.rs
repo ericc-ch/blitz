@@ -557,18 +557,6 @@ impl Node {
             .unwrap_or(false)
     }
 
-    /// Whether the node is visible per its computed `visibility` longhand
-    /// only (not `display`: `display:none` boxes are zero-area and never
-    /// contain a point, which is what the sole `element_at_point` caller
-    /// relies on). Nodes without computed styles (text, comments, unstyled
-    /// subtrees) count as visible.
-    pub fn is_visible(&self) -> bool {
-        self.primary_styles().is_none_or(|styles| {
-            use style::properties::generated::longhands::visibility::computed_value::T as Visibility;
-            styles.get_inherited_box().visibility == Visibility::Visible
-        })
-    }
-
     pub fn set_restyle_hint(&mut self, hint: RestyleHint) {
         if let Some(stylo_element_data) = self.try_stylo_element_data_mut() {
             if let Some(mut element_data) = stylo_element_data.get_mut() {
