@@ -183,7 +183,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         let child_ids = mutr.child_ids(fragment_root_id);
         let destination = {
             if mutr.is_template_element(element_id) {
-                mutr.ensure_template_contents(element_id)
+                mutr.template_contents(element_id)
             } else {
                 element_id
             }
@@ -376,10 +376,9 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
     }
 
     fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
-        // Template children parse into the template contents fragment, not
-        // the element's children
-        // (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
-        self.mutr().ensure_template_contents(*target)
+        // Parse a template element's children into its (detached, inert)
+        // "template contents" fragment node rather than into the element itself
+        self.mutr().template_contents(*target)
     }
 
     fn same_node(&self, x: &Self::Handle, y: &Self::Handle) -> bool {

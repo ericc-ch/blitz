@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise the output of `wpt diff` and publish it into the PR description.
+"""Summarise the output of `wpt diff --format json` and publish it into the PR description.
 
 The section is delimited by HTML comment markers so that re-runs of the
 workflow replace the previous results instead of appending a new section.
@@ -8,7 +8,6 @@ workflow replace the previous results instead of appending a new section.
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 
@@ -16,90 +15,216 @@ START_MARKER = "<!-- wpt-results-start -->"
 END_MARKER = "<!-- wpt-results-end -->"
 
 PASSING_STATUSES = {"PASS", "OK"}
+SUBTEST_PASS = "PASS"
 MAX_DIFF_LINES = 400
 
-CHANGE_RE = re.compile(r"^(\w+) => (\w+) (.*)$")
-ADD_REM_RE = re.compile(r"^(ADD|REM)\s+(.*)$")
+
+def subtest_passes(subtest):
+    """Whether a changed subtest passed (before, after)."""
+    if subtest["kind"] == "added":
+        return False, subtest["status"] == SUBTEST_PASS
+    if subtest["kind"] == "removed":
+        return subtest["status"] == SUBTEST_PASS, False
+    return subtest["before"] == SUBTEST_PASS, subtest["after"] == SUBTEST_PASS
+
+
+class Change:
+    """A single changed test, in the shape rendered into the PR description."""
+
+    def __init__(self, entry):
+        self.test = entry["test"]
+        self.kind = entry["kind"]
+
+        if self.kind == "added":
+            self.before, self.after = None, entry["status"]
+            self.status = "ADD"
+            self.counts = entry["counts"]
+            self.delta = self.counts["pass"]
+        elif self.kind == "removed":
+            self.before, self.after = entry["status"], None
+            self.status = "REM"
+            self.counts = entry["counts"]
+            self.delta = -self.counts["pass"]
+        else:
+            self.before, self.after = entry["before"], entry["after"]
+            self.status = f"{self.before} => {self.after}"
+            self.counts = entry["counts_after"]
+            self.delta = self.counts["pass"] - entry["counts_before"]["pass"]
+
+        # The net change hides subtests that moved in opposite directions, so
+        # count each direction from the individual subtest changes if present.
+        subtests = entry.get("subtests") or []
+        if subtests:
+            passes = [subtest_passes(subtest) for subtest in subtests]
+            self.gained = sum(1 for before, after in passes if after and not before)
+            self.lost = sum(1 for before, after in passes if before and not after)
+        else:
+            self.gained, self.lost = max(self.delta, 0), max(-self.delta, 0)
+
+        self.newly_passing = self.kind == "changed" and (
+            self.before not in PASSING_STATUSES and self.after in PASSING_STATUSES
+        )
+        self.newly_failing = self.kind == "changed" and (
+            self.before in PASSING_STATUSES and self.after not in PASSING_STATUSES
+        )
+
+    @property
+    def is_relevant(self):
+        """False if only non-passing subtest statuses changed (e.g. FAIL to TIMEOUT)."""
+        return bool(
+            self.kind != "changed"
+            or self.before != self.after
+            or self.delta
+            or self.gained
+            or self.lost
+        )
+
+    @property
+    def marker(self):
+        if self.newly_passing or self.kind == "added":
+            return "+"
+        if self.newly_failing or self.kind == "removed":
+            return "-"
+        if self.before == self.after and not (self.gained and self.lost):
+            if self.delta > 0:
+                return "+"
+            if self.delta < 0:
+                return "-"
+        return "!"
+
+    @property
+    def delta_text(self):
+        if self.gained and self.lost:
+            return f"+{self.gained}/-{self.lost}"
+        return f"{self.delta:+}"
 
 
 class Diff:
-    def __init__(self):
-        self.newly_passing = []
-        self.newly_failing = []
-        self.other_changes = []
-        self.added = []
-        self.removed = []
+    def __init__(self, entries):
+        changes = (Change(entry) for entry in entries)
+        self.changes = sorted((c for c in changes if c.is_relevant), key=lambda c: c.test)
 
     @property
     def is_empty(self):
-        return not (
-            self.newly_passing
-            or self.newly_failing
-            or self.other_changes
-            or self.added
-            or self.removed
+        return not self.changes
+
+    def count(self, predicate):
+        return sum(1 for change in self.changes if predicate(change))
+
+    @property
+    def subtests_gained(self):
+        return sum(change.gained for change in self.changes)
+
+    @property
+    def subtests_lost(self):
+        return sum(change.lost for change in self.changes)
+
+    def status_delta(self, status):
+        """The change in the number of tests with the given status."""
+        return self.count(lambda c: c.after == status) - self.count(
+            lambda c: c.before == status
         )
 
 
-def parse_diff(text):
-    diff = Diff()
-    for line in text.splitlines():
-        line = line.rstrip()
-        if not line or line.startswith("=====") or line.startswith("Done in "):
-            continue
-
-        match = ADD_REM_RE.match(line)
-        if match:
-            kind, test = match.groups()
-            (diff.added if kind == "ADD" else diff.removed).append(test)
-            continue
-
-        match = CHANGE_RE.match(line)
-        if match:
-            before, after, test = match.groups()
-            entry = (before, after, test)
-            if before.upper() not in PASSING_STATUSES and after.upper() in PASSING_STATUSES:
-                diff.newly_passing.append(entry)
-            elif before.upper() in PASSING_STATUSES and after.upper() not in PASSING_STATUSES:
-                diff.newly_failing.append(entry)
-            else:
-                diff.other_changes.append(entry)
-
-    return diff
-
-
 def format_lines(diff):
-    """Render the changes as diff-syntax lines sorted by test name."""
-    lines = []
-    for marker, entries in [("+", diff.newly_passing), ("-", diff.newly_failing), ("!", diff.other_changes)]:
-        for before, after, test in entries:
-            lines.append((test, f"{marker} {before} => {after} {test}"))
-    lines.extend((test, f"+ ADD {test}") for test in diff.added)
-    lines.extend((test, f"- REM {test}") for test in diff.removed)
-    lines.sort()
-    return [line for _, line in lines]
+    """Render the changes as diff-syntax lines, aligned into columns."""
+
+    def counts_of(change):
+        return "[{}/{}]".format(change.counts["pass"], change.counts["total"])
+
+    status_width = max(len(change.status) for change in diff.changes)
+    counts_width = max(len(counts_of(change)) for change in diff.changes)
+    delta_width = max(len(change.delta_text) for change in diff.changes)
+
+    return [
+        "{} {:<{}}  {:>{}}  {:>{}}  {}".format(
+            change.marker,
+            change.status,
+            status_width,
+            counts_of(change),
+            counts_width,
+            change.delta_text,
+            delta_width,
+            change.test,
+        )
+        for change in diff.changes
+    ]
 
 
-def render(diff, run_url):
-    net = len(diff.newly_passing) - len(diff.newly_failing)
+def format_area_lines(areas):
+    """Render per-area subtest changes as diff-syntax lines, nested areas indented."""
+
+    def percent(passing, total):
+        return 100 * passing / total if total else 0.0
+
+    rows = []
+    for area in areas:
+        net = area["after"] - area["before"]
+        before = percent(area["before"], area["total"])
+        after = percent(area["after"], area["total"])
+        depth = area["area"].count("/")
+        rows.append(
+            (
+                "+" if net > 0 else "-" if net < 0 else "!",
+                "  " * depth + area["area"].rsplit("/", 1)[-1],
+                f"{net:+}",
+                f"+{area['gained']}",
+                f"-{area['lost']}",
+                f"{before:.2f}%",
+                f"{after:.2f}%",
+                f"{after - before:+.2f}%",
+                str(area["before"]),
+                str(area["after"]),
+                str(area["total"]),
+            )
+        )
+
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    template = "{} {:<{}} | {:>{}} ({:>{}} / {:>{}}) | {:>{}} -> {:>{}} ({:>{}}) | {:>{}} -> {:>{}} / {:>{}}"
+    return [
+        template.format(
+            row[0], *(value for i in range(1, len(row)) for value in (row[i], widths[i]))
+        ).rstrip()
+        for row in rows
+    ]
+
+
+def render(diff, run_url, areas=None):
     if diff.is_empty:
         headline = "No changes in test results compared to `main`."
     else:
-        sign = "+" if net > 0 else ""
-        parts = [
-            f"**{len(diff.newly_passing)}** newly passing",
-            f"**{len(diff.newly_failing)}** newly failing (net {sign}{net})",
-        ]
+        gained, lost = diff.subtests_gained, diff.subtests_lost
+        headline = (
+            f"Subtests: **{gained}** newly passing, **{lost}** newly failing "
+            f"(net {gained - lost:+})."
+        )
+        parts = []
         for count, label in [
-            (len(diff.other_changes), "other status change"),
-            (len(diff.added), "added test"),
-            (len(diff.removed), "removed test"),
+            (diff.count(lambda c: c.kind == "added"), "added"),
+            (diff.count(lambda c: c.kind == "removed"), "removed"),
         ]:
             if count:
-                parts.append(f"**{count}** {label}{'s' if count != 1 else ''}")
-        headline = ", ".join(parts) + "."
+                parts.append(f"**{count}** {label}")
+        if parts:
+            headline += " Tests: " + ", ".join(parts) + "."
+        for status, label in [("CRASH", "Crashes"), ("TIMEOUT", "Timeouts")]:
+            delta = diff.status_delta(status)
+            if delta:
+                headline += f" {label}: **{delta:+}**."
 
     out = [START_MARKER, "## WPT results", "", headline, ""]
+
+    if areas:
+        noun = "area" if len(areas) == 1 else "areas"
+        out.append("<details>")
+        out.append(f"<summary>Subtest changes by area ({len(areas)} {noun})</summary>")
+        out.append("")
+        out.append("```diff")
+        out.extend(format_area_lines(areas))
+        out.append("```")
+        out.append("")
+        out.append("</details>")
+        out.append("")
 
     if not diff.is_empty:
         lines = format_lines(diff)
@@ -151,13 +276,19 @@ def main():
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--pr", default=os.environ.get("PR_NUMBER"))
     parser.add_argument("--run-url", default=os.environ.get("RUN_URL"))
+    parser.add_argument("--areas", help="per-area changes from wpt_area_changes.py")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     with open(args.diff_file, encoding="utf-8") as file:
-        diff = parse_diff(file.read())
+        diff = Diff(json.load(file))
 
-    section = render(diff, args.run_url)
+    areas = None
+    if args.areas and os.path.exists(args.areas):
+        with open(args.areas, encoding="utf-8") as file:
+            areas = json.load(file)
+
+    section = render(diff, args.run_url, areas)
 
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:

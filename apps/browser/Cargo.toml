@@ -31,6 +31,8 @@ cache = ["blitz-net/cache"]
 cookies = ["blitz-net/cookies"]
 avif = ["image/avif"]
 webp = ["image/webp"]
+# Enable JavaScript execution for loaded pages (via blitz-vibey-script's Boa-based engine)
+javascript = ["dep:blitz-vibey-script"]
 tracing = ["dioxus-native/tracing", "blitz-html/tracing", "blitz-net/tracing", "blitz-paint?/tracing", "dep:tracing-subscriber"]
 hot-reload = ["dioxus-native/hot-reload"]
 accessibility = ["dioxus-native/accessibility"]
@@ -38,6 +40,7 @@ scrollbars = ["blitz-dom/scrollbars", "blitz-paint/scrollbars"]
 mimalloc = ["dep:mimalloc"]
 font-embolden = ["dioxus-native/font-embolden"]
 apple-font-embolden = ["dioxus-native/apple-font-embolden"]
+writing-mode = ["blitz-dom/writing-mode", "dioxus-native/writing-mode"]
 
 [dependencies]
 dioxus-native = { workspace = true, features = [
@@ -49,9 +52,10 @@ dioxus-native = { workspace = true, features = [
   "hot-reload"
 ] }
 blitz-traits = { workspace = true }
-blitz-dom = { workspace = true, features = ["woff", "parallel-construct", "floats"] }
+blitz-dom = { workspace = true, features = ["woff", "parallel-construct", "floats", "text-transform-icu"] }
 blitz-net = { workspace = true, features = ["http2"] }
 blitz-html = { workspace = true }
+blitz-vibey-script = { workspace = true, optional = true }
 browser-persistence = { workspace = true }
 linebender_resource_handle = { workspace = true }
 tracing = { workspace = true }
