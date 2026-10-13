@@ -1,6 +1,5 @@
 #![allow(clippy::collapsible_if)]
 
-mod entity;
 mod html_document;
 mod html_sink;
 

@@ -136,18 +136,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
     pub fn parse_xml_into_mutator<'a, 'd>(mutr: &'a mut DocumentMutator<'d>, xml: &str) {
         let mut sink = DocumentHtmlParser::new(mutr);
         sink.is_xml = true;
-        // Internal general entities are not part of any parser's token
-        // stream: expand the internal subset up front, bounded against
-        // billion laughs (see `entity`).
-        let (expanded, entity_errors) =
-            crate::entity::expand_internal_general_entities_with_errors(xml);
-        for error in entity_errors {
-            sink.parse_error(Cow::Owned(error));
-        }
-        xml5ever::driver::parse_document(sink, Default::default())
-            .from_utf8()
-            .read_from(&mut expanded.as_bytes())
-            .unwrap();
+        xml5ever::driver::parse_document_expanding_entities(sink, Default::default(), xml);
     }
 
     pub fn parse_inner_html_into_mutator<'a, 'd>(
