@@ -216,12 +216,17 @@ impl crate::document::BaseDocument {
             snapshot_map: &self.snapshots,
             registered_speculative_painters: &RegisteredPaintersImpl,
         };
-        let mut thread_local = ThreadLocalStyleContext::new();
-        let mut context = StyleContext {
-            shared: &shared,
-            thread_local: &mut thread_local,
+        // Drop the style context (and the sequential tasks it queued) while
+        // the layout thread state is still set: `SequentialTaskList::drop`
+        // asserts that state, and the tasks must run before it clears.
+        let styles = {
+            let mut thread_local = ThreadLocalStyleContext::new();
+            let mut context = StyleContext {
+                shared: &shared,
+                thread_local: &mut thread_local,
+            };
+            resolve_style(&mut context, node, RuleInclusion::All, None, None)
         };
-        let styles = resolve_style(&mut context, node, RuleInclusion::All, None, None);
 
         style::thread_state::exit(ThreadState::LAYOUT);
 
