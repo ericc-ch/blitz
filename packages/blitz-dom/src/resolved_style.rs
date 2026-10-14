@@ -377,8 +377,13 @@ impl BaseDocument {
                     || *tag == local_name!("textarea")
                     || *tag == local_name!("button"))
             });
-        let generates_box =
-            node.flags.is_in_document() && !display.is_none() && stored_styles.is_some();
+        // `display: contents` generates no box of its own, so its
+        // layout-dependent properties resolve to computed (not used) values
+        // (<https://drafts.csswg.org/cssom/#resolved-value>).
+        let generates_box = node.flags.is_in_document()
+            && !display.is_none()
+            && display.inside() != DisplayInside::Contents
+            && stored_styles.is_some();
         let has_layout_box = generates_box && !is_non_atomic_inline;
 
         let Ok(property_id) = PropertyId::parse_enabled_for_all_content(property_name) else {
