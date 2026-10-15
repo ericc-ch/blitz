@@ -1253,9 +1253,11 @@ impl BaseDocument {
     }
 
     /// Iterate over the author stylesheets (from `<style>` and `<link>` nodes)
-    /// currently associated with this document
+    /// currently associated with this document, in tree order.
     pub fn author_stylesheets(&self) -> impl Iterator<Item = &DocumentStyleSheet> {
-        self.nodes_to_stylesheet.values()
+        self.stylesheet_owners_in_tree_order()
+            .into_iter()
+            .filter_map(|owner| self.nodes_to_stylesheet.get(&owner))
     }
 
     /// Iterate over the user-agent stylesheets currently associated with this document
@@ -3642,7 +3644,7 @@ mod cascade_position_tests {
     fn moving_a_style_element_moves_its_cascade_position() {
         let mut doc = document();
         let root = doc.root_node().id;
-        let (first, second, paragraph) = {
+        let (first, second, paragraph, red, blue) = {
             let mut mutator = doc.mutate();
             let html = mutator.create_element(qual_name!("html"), vec![]);
             let body = mutator.create_element(qual_name!("body"), vec![]);
@@ -3653,23 +3655,51 @@ mod cascade_position_tests {
             let second_text = mutator.create_text_node("p { color: rgb(0, 0, 1); }");
             mutator.append_children(second, &[second_text]);
             let paragraph = mutator.create_element(qual_name!("p"), vec![]);
-            mutator.append_children(body, &[first, second, paragraph]);
+            let red = mutator.create_element(
+                qual_name!("span"),
+                vec![Attribute {
+                    name: qual_name!("style"),
+                    value: "color: rgb(1, 0, 0)".into(),
+                }],
+            );
+            let blue = mutator.create_element(
+                qual_name!("span"),
+                vec![Attribute {
+                    name: qual_name!("style"),
+                    value: "color: rgb(0, 0, 1)".into(),
+                }],
+            );
+            mutator.append_children(body, &[first, second, paragraph, red, blue]);
             mutator.append_children(html, &[body]);
             mutator.append_children(root, &[html]);
-            (first, second, paragraph)
+            (first, second, paragraph, red, blue)
         };
         doc.resolve(0.0);
-        let before = text_color(&doc, paragraph);
+        assert_eq!(
+            doc.stylesheet_owner_nodes().collect::<Vec<_>>(),
+            vec![first, second],
+            "document order is the earlier sheet, then the later one"
+        );
+        assert_eq!(
+            text_color(&doc, paragraph),
+            text_color(&doc, blue),
+            "the later sheet wins before the move"
+        );
         {
             let mut mutator = doc.mutate();
             mutator.remove_node(second);
             mutator.insert_nodes_before(first, &[second]);
         }
         doc.resolve(0.0);
-        let after = text_color(&doc, paragraph);
-        assert_ne!(
-            before, after,
-            "moving the later sheet before the earlier one should change the winning color"
+        assert_eq!(
+            doc.stylesheet_owner_nodes().collect::<Vec<_>>(),
+            vec![second, first],
+            "moving the later sheet ahead of the earlier one changes owner order"
+        );
+        assert_eq!(
+            text_color(&doc, paragraph),
+            text_color(&doc, red),
+            "the moved sheet wins after the move"
         );
     }
 
@@ -3725,6 +3755,45 @@ mod cascade_position_tests {
             text_color(&doc, empty),
             text_color(&doc, filled),
             "clearing the value shows the placeholder"
+        );
+
+        // Typing updates the editor and leaves the value attribute empty.
+        // The placeholder bit has to follow the editor
+        // (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fe-value>).
+        {
+            let editor = doc.nodes[empty]
+                .element_data_mut()
+                .and_then(|element| element.text_input_data_mut())
+                .expect("layout creates a text editor for the input");
+            editor.set_text(
+                &mut doc.font_ctx.lock().unwrap(),
+                &mut doc.layout_ctx,
+                "typed",
+            );
+        }
+        doc.apply_generated_text_input_event(
+            empty,
+            crate::node::GeneratedTextInputEvent::Input,
+            |_| {},
+        );
+        assert_eq!(
+            doc.nodes[empty].attr(local_name!("value")),
+            None,
+            "typing does not write the value attribute"
+        );
+        doc.resolve(0.0);
+        assert_ne!(
+            text_color(&doc, empty),
+            text_color(&doc, filled),
+            "a non-empty editor hides the placeholder"
+        );
+        assert!(
+            !doc.nodes[empty]
+                .element_data()
+                .unwrap()
+                .element_state
+                .contains(style_dom::ElementState::PLACEHOLDER_SHOWN),
+            "PLACEHOLDER_SHOWN follows the editor"
         );
     }
 }

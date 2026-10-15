@@ -403,6 +403,15 @@ impl DocumentMutator<'_> {
         }
 
         element.attrs.set(name.clone(), value);
+        if name.local == local_name!("value") {
+            if let Some(input_data) = element.text_input_data_mut() {
+                input_data.set_text(
+                    &mut self.doc.font_ctx.lock().unwrap(),
+                    &mut self.doc.layout_ctx,
+                    value,
+                );
+            }
+        }
         if refresh_placeholder {
             element.sync_placeholder_shown(textarea_text_empty);
         }
@@ -430,14 +439,6 @@ impl DocumentMutator<'_> {
         }
 
         if *attr == local_name!("value") {
-            if let Some(input_data) = element.text_input_data_mut() {
-                // Update text input value
-                input_data.set_text(
-                    &mut self.doc.font_ctx.lock().unwrap(),
-                    &mut self.doc.layout_ctx,
-                    value,
-                );
-            }
             return;
         }
 
@@ -560,11 +561,6 @@ impl DocumentMutator<'_> {
             element.flush_link_state();
         }
 
-        if refresh_placeholder {
-            element.sync_placeholder_shown(textarea_text_empty);
-        }
-
-        // Update text input value
         if name.local == local_name!("value") {
             if let Some(input_data) = element.text_input_data_mut() {
                 input_data.set_text(
@@ -573,6 +569,9 @@ impl DocumentMutator<'_> {
                     "",
                 );
             }
+        }
+        if refresh_placeholder {
+            element.sync_placeholder_shown(textarea_text_empty);
         }
 
         let tag = &element.name.local;
@@ -846,6 +845,7 @@ impl DocumentMutator<'_> {
             .snapshot_node_and(node_id, ElementState::PLACEHOLDER_SHOWN, |node| {
                 node.flush_placeholder_shown();
             });
+        self.doc.nodes[node_id].mark_ancestors_dirty();
     }
 
     // Tree mutation methods (that defer to other methods)

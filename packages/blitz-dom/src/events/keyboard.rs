@@ -7,6 +7,7 @@ use blitz_traits::{
 };
 use keyboard_types::{Key, Modifiers};
 use markup5ever::local_name;
+use style_dom::ElementState;
 
 pub(super) enum KeyboardOrTextInputEvent {
     KeyPress(BlitzKeyEvent),
@@ -107,21 +108,32 @@ impl BaseDocument {
         event: GeneratedTextInputEvent,
         mut dispatch_event: F,
     ) {
-        let node = &mut self.nodes[node_id];
-        let element_data = node
-            .element_data_mut()
-            .expect("apply_generated_text_input_event called on a node that is not an element");
-        let input_data = element_data
-            .text_input_data_mut()
-            .expect("apply_generated_text_input_event called on a node that is not a text input");
+        let value = {
+            let node = &self.nodes[node_id];
+            let element_data = node
+                .element_data()
+                .expect("apply_generated_text_input_event called on a node that is not an element");
+            let input_data = element_data.text_input_data().expect(
+                "apply_generated_text_input_event called on a node that is not a text input",
+            );
+            input_data.editor.raw_text().to_string()
+        };
 
         match event {
             GeneratedTextInputEvent::Input => {
-                let value = input_data.editor.raw_text().to_string();
                 dispatch_event(DomEvent::new(
                     node_id,
                     DomEventData::Input(BlitzInputEvent { value }),
                 ));
+                // Typing updates the editor without touching the value
+                // attribute. The placeholder bit tracks that live value
+                // (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fe-value>).
+                self.snapshot_node_and(node_id, ElementState::PLACEHOLDER_SHOWN, |node| {
+                    node.flush_placeholder_shown();
+                });
+                // The snapshot records the pre-change state. Ancestors have to
+                // be dirty or the style traversal never reaches this control.
+                self.nodes[node_id].mark_ancestors_dirty();
                 self.shell_provider.request_redraw();
             }
             GeneratedTextInputEvent::Select | GeneratedTextInputEvent::PreEditChange => {

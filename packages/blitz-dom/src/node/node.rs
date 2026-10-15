@@ -1282,7 +1282,7 @@ impl Node {
     }
 
     /// Recompute [`ElementState::PLACEHOLDER_SHOWN`] from this control's
-    /// attributes and, for a `textarea`, its text content.
+    /// live value, or from its attributes and text content before an editor exists.
     pub fn flush_placeholder_shown(&mut self) {
         let is_control = self
             .element_data()

@@ -495,30 +495,35 @@ impl ElementData {
     /// Keep [`ElementState::PLACEHOLDER_SHOWN`] aligned with whether this
     /// control is showing its placeholder.
     ///
-    /// An `input` shows it when its type is a textual state (a missing or
-    /// unknown type is the text state), its placeholder attribute is
-    /// non-empty, and its value attribute is empty. A `textarea` shows it
-    /// when its placeholder is non-empty and `textarea_text_empty` is set.
+    /// An `input` or `textarea` shows it when its placeholder attribute is
+    /// non-empty and its live value is empty. Once a text editor exists, that
+    /// value is `editor.raw_text()` (the HTML value concept). Before the
+    /// editor exists, an input falls back to the value attribute and a
+    /// textarea falls back to `fallback_value_empty` (its child text).
     ///
     /// <https://drafts.csswg.org/selectors/#placeholder-shown-pseudo>
     /// <https://html.spec.whatwg.org/multipage/input.html#the-placeholder-attribute>
-    /// <https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element>
-    pub fn sync_placeholder_shown(&mut self, textarea_text_empty: bool) {
-        let shown = self.placeholder_is_shown(textarea_text_empty);
+    /// <https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-fe-value>
+    pub fn sync_placeholder_shown(&mut self, fallback_value_empty: bool) {
+        let shown = self.placeholder_is_shown(fallback_value_empty);
         self.element_state
             .set(ElementState::PLACEHOLDER_SHOWN, shown);
     }
 
-    fn placeholder_is_shown(&self, textarea_text_empty: bool) -> bool {
+    fn placeholder_is_shown(&self, fallback_value_empty: bool) -> bool {
         let placeholder = self.attr(local_name!("placeholder")).unwrap_or("");
         if placeholder.is_empty() {
             return false;
         }
+        let live_empty = self
+            .text_input_data()
+            .map(|input| input.editor.raw_text().is_empty());
         match self.name.local.as_ref() {
-            "textarea" => textarea_text_empty,
+            "textarea" => live_empty.unwrap_or(fallback_value_empty),
             "input" => {
                 self.input_placeholder_applies()
-                    && self.attr(local_name!("value")).unwrap_or("").is_empty()
+                    && live_empty
+                        .unwrap_or_else(|| self.attr(local_name!("value")).unwrap_or("").is_empty())
             }
             _ => false,
         }

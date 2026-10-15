@@ -293,13 +293,28 @@ fn rule_attributes(rule: &CssRule, guard: &SharedRwLockReadGuard) -> Vec<(&'stat
 
 impl BaseDocument {
     /// The owner nodes (`<style>` / `<link>` elements) of the document's author
-    /// stylesheets (`document.styleSheets`).
+    /// stylesheets (`document.styleSheets`), in tree order.
     ///
-    /// Ordered by node id, which matches document order for stylesheets
-    /// created while parsing (and is the order the stylist uses too, see
-    /// `add_stylesheet_for_node`).
+    /// Node id is not document order: `moveBefore` keeps the id and changes
+    /// position. This matches the order `add_stylesheet_for_node` inserts
+    /// into the stylist
+    /// (<https://drafts.csswg.org/cssom/#concept-document-or-shadow-root-css-style-sheets>).
     pub fn stylesheet_owner_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes_to_stylesheet.keys().copied()
+        self.stylesheet_owners_in_tree_order().into_iter()
+    }
+
+    pub(crate) fn stylesheet_owners_in_tree_order(&self) -> Vec<NodeId> {
+        let mut owners: Vec<NodeId> = self.nodes_to_stylesheet.keys().copied().collect();
+        owners.sort_by(|left, right| {
+            if self.precedes_in_tree_order(*left, *right) {
+                std::cmp::Ordering::Less
+            } else if self.precedes_in_tree_order(*right, *left) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        owners
     }
 
     /// Whether `node_id` currently owns a stylesheet
