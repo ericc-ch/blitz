@@ -5,6 +5,7 @@ use blitz_traits::{
     shell::{ShellProvider, Viewport},
 };
 use parley::FontContext;
+use selectors::matching::QuirksMode;
 use std::sync::Arc;
 use style::media_queries::MediaType;
 
@@ -68,6 +69,11 @@ pub struct DocumentConfig {
     /// How deeply this document is nested within other documents
     /// (0 for a root document). Used to limit `<iframe>` nesting depth.
     pub subdocument_depth: usize,
+    /// When set, the document starts in this mode and the HTML parser cannot
+    /// override it. Layout and author stylesheets then follow the caller's
+    /// doctype sniff instead of html5ever's
+    /// (<https://html.spec.whatwg.org/multipage/parsing.html#the-initial-insertion-mode>).
+    pub quirks_mode: Option<QuirksMode>,
 }
 
 impl Default for DocumentConfig {
@@ -86,6 +92,7 @@ impl Default for DocumentConfig {
             incremental: None,
             abort_signal: None,
             subdocument_depth: 0,
+            quirks_mode: None,
         }
     }
 }

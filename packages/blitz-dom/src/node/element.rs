@@ -82,6 +82,11 @@ pub struct ElementData {
     /// The shadow root this element hosts, if it is a shadow host
     /// (<https://dom.spec.whatwg.org/#dom-element-shadowroot>).
     pub shadow_root: Option<NodeId>,
+
+    /// Dirty value, checkedness, selectedness, and indeterminate.
+    /// Absent flags fall back to the content attribute or descendant text
+    /// (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#definitions>).
+    pub form_state: FormControlState,
     // /// Whether the node is a [HTML integration point] (https://html.spec.whatwg.org/multipage/#html-integration-point)
     // pub mathml_annotation_xml_integration_point: bool,
 
@@ -119,6 +124,22 @@ pub struct ElementData {
     /// Layout output state (`None` until layout first writes to this node).
     pub layout_data: Option<Box<LayoutData>>,
     pub transform: Option<Box<Affine>>,
+}
+
+/// Live form-control state that is not the content attribute.
+///
+/// <https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>
+/// <https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>
+/// <https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>
+#[derive(Clone, Debug, Default)]
+pub struct FormControlState {
+    pub dirty_value: bool,
+    pub value: String,
+    pub dirty_checkedness: bool,
+    pub checkedness: bool,
+    pub dirty_selectedness: bool,
+    pub selectedness: bool,
+    pub indeterminate: bool,
 }
 
 /// Taffy layout output state (cache, layouts, scroll offset and overflow).
@@ -317,6 +338,9 @@ impl Clone for ElementData {
             // host's clone does not copy its shadow tree
             // (<https://dom.spec.whatwg.org/#concept-node-clone>).
             shadow_root: None,
+            // Cloning copies dirty value, checkedness, and selectedness
+            // (<https://html.spec.whatwg.org/multipage/input.html#input-element-cloning-steps>).
+            form_state: self.form_state.clone(),
 
             // Runtime state: reset to defaults.
             stylo_element_data: Default::default(),
@@ -424,6 +448,7 @@ impl ElementData {
             special_data: SpecialElementData::None,
             template_contents: None,
             shadow_root: None,
+            form_state: FormControlState::default(),
             background_images: ThinVec::new(),
             mask_images: ThinVec::new(),
 
@@ -447,12 +472,15 @@ impl ElementData {
 
         // Mirror the `checked` attribute into the element state so that `:checked`
         // selectors can be matched (and invalidated) from `ElementState`.
+        // A selected `option` uses the same bit
+        // (<https://drafts.csswg.org/selectors/#checked-pseudo>).
         if data.name.local == local_name!("input")
             && matches!(
                 data.attr(local_name!("type")),
                 Some("checkbox") | Some("radio")
             )
             && data.has_attr(local_name!("checked"))
+            || data.name.local == local_name!("option") && data.has_attr(local_name!("selected"))
         {
             data.element_state.insert(ElementState::CHECKED);
         }
@@ -524,17 +552,130 @@ impl ElementData {
         if placeholder.is_empty() {
             return false;
         }
-        let live_empty = self
-            .text_input_data()
-            .map(|input| input.editor.raw_text().is_empty());
-        match self.name.local.as_ref() {
-            "textarea" => live_empty.unwrap_or(fallback_value_empty),
-            "input" => {
-                self.input_placeholder_applies()
-                    && live_empty
-                        .unwrap_or_else(|| self.attr(local_name!("value")).unwrap_or("").is_empty())
+        // The editor is the live value once layout has built one. A dirty
+        // value replaces the attribute or descendant text before that
+        // (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>,
+        // <https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element>).
+        let empty = if let Some(input) = self.text_input_data() {
+            input.editor.raw_text().is_empty()
+        } else if self.form_state.dirty_value {
+            self.form_state.value.is_empty()
+        } else {
+            match self.name.local.as_ref() {
+                "textarea" => fallback_value_empty,
+                "input" => self.attr(local_name!("value")).unwrap_or("").is_empty(),
+                _ => return false,
             }
+        };
+        match self.name.local.as_ref() {
+            "textarea" => empty,
+            "input" => self.input_placeholder_applies() && empty,
             _ => false,
+        }
+    }
+
+    /// The current value of a text control: the dirty value when the flag is
+    /// set, otherwise the `value` content attribute
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
+    pub fn control_value(&self) -> &str {
+        if self.form_state.dirty_value {
+            &self.form_state.value
+        } else {
+            self.attr(local_name!("value")).unwrap_or("")
+        }
+    }
+
+    /// Checkedness: the dirty flag when set, otherwise the `checked` attribute
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>).
+    pub fn checkedness(&self) -> bool {
+        if self.form_state.dirty_checkedness {
+            self.form_state.checkedness
+        } else {
+            self.has_attr(local_name!("checked"))
+        }
+    }
+
+    /// Selectedness: the dirty flag when set, otherwise the `selected` attribute
+    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>).
+    pub fn selectedness(&self) -> bool {
+        if self.form_state.dirty_selectedness {
+            self.form_state.selectedness
+        } else {
+            self.has_attr(local_name!("selected"))
+        }
+    }
+
+    /// Records a dirty value and refreshes `:placeholder-shown`.
+    pub fn store_dirty_value(&mut self, value: String) {
+        self.form_state.dirty_value = true;
+        self.form_state.value = value;
+        let empty = self.form_state.value.is_empty();
+        self.sync_placeholder_shown(empty);
+    }
+
+    /// Records dirty checkedness and the `:checked` bit.
+    pub fn store_checkedness(&mut self, checked: bool) {
+        self.form_state.dirty_checkedness = true;
+        self.form_state.checkedness = checked;
+        self.set_checkbox_input_checked(checked);
+    }
+
+    /// Records dirty selectedness. Options match `:checked` from the same bit.
+    pub fn store_selectedness(&mut self, selected: bool) {
+        self.form_state.dirty_selectedness = true;
+        self.form_state.selectedness = selected;
+        self.element_state.set(ElementState::CHECKED, selected);
+    }
+
+    /// The indeterminate IDL flag. It is not a content attribute
+    /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-indeterminate>).
+    pub fn store_indeterminate(&mut self, indeterminate: bool) {
+        self.form_state.indeterminate = indeterminate;
+        self.element_state
+            .set(ElementState::INDETERMINATE, indeterminate);
+    }
+
+    /// Drops dirty flags so the content attribute and descendant text are
+    /// current again
+    /// (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#reset-the-form-owner>).
+    pub fn reset_control_state(&mut self, textarea_text_empty: bool) {
+        self.form_state = FormControlState::default();
+        let checked = self.name.local == local_name!("input")
+            && matches!(
+                self.attr(local_name!("type")),
+                Some("checkbox") | Some("radio")
+            )
+            && self.has_attr(local_name!("checked"))
+            || self.name.local == local_name!("option") && self.has_attr(local_name!("selected"));
+        self.element_state.set(ElementState::CHECKED, checked);
+        self.element_state.set(ElementState::INDETERMINATE, false);
+        if let Some(slot) = self.checkbox_input_checked_mut() {
+            *slot = checked;
+        }
+        self.sync_placeholder_shown(textarea_text_empty);
+    }
+
+    /// Applies a cloned control's live state and refreshes the selector bits.
+    /// Unlike [`reset_control_state`](Self::reset_control_state), the dirty
+    /// flags survive so a later `setAttribute` cannot override the clone
+    /// (<https://html.spec.whatwg.org/multipage/input.html#input-element-cloning-steps>).
+    pub fn adopt_cloned_state(&mut self, state: FormControlState) {
+        self.form_state = state;
+        let checked = match self.name.local.as_ref() {
+            "input" => {
+                matches!(
+                    self.attr(local_name!("type")),
+                    Some("checkbox") | Some("radio")
+                ) && self.checkedness()
+            }
+            "option" => self.selectedness(),
+            _ => false,
+        };
+        self.element_state.set(ElementState::CHECKED, checked);
+        self.element_state
+            .set(ElementState::INDETERMINATE, self.form_state.indeterminate);
+        if let Some(slot) = self.checkbox_input_checked_mut() {
+            *slot = checked;
         }
     }
 
@@ -745,13 +886,18 @@ impl ElementData {
                 })
     }
 
-    pub fn flush_style_attribute(&mut self, guard: &SharedRwLock, url_extra_data: &UrlExtraData) {
+    pub fn flush_style_attribute(
+        &mut self,
+        guard: &SharedRwLock,
+        url_extra_data: &UrlExtraData,
+        quirks_mode: QuirksMode,
+    ) {
         self.style_attribute = self.attr(local_name!("style")).map(|style_str| {
             ServoArc::new(guard.wrap(parse_style_attribute(
                 style_str,
                 url_extra_data,
                 None,
-                QuirksMode::NoQuirks,
+                quirks_mode,
                 CssRuleType::Style,
             )))
         });
@@ -763,13 +909,14 @@ impl ElementData {
         value: &str,
         guard: &SharedRwLock,
         url_extra_data: UrlExtraData,
+        quirks_mode: QuirksMode,
     ) -> bool {
         let context = ParserContext::new(
             Origin::Author,
             &url_extra_data,
             Some(CssRuleType::Style),
             ParsingMode::DEFAULT,
-            QuirksMode::NoQuirks,
+            quirks_mode,
             /* namespaces = */ Default::default(),
             None,
             None,
@@ -830,13 +977,14 @@ impl ElementData {
         name: &str,
         guard: &SharedRwLock,
         url_extra_data: UrlExtraData,
+        quirks_mode: QuirksMode,
     ) -> bool {
         let context = ParserContext::new(
             Origin::Author,
             &url_extra_data,
             Some(CssRuleType::Style),
             ParsingMode::DEFAULT,
-            QuirksMode::NoQuirks,
+            quirks_mode,
             /* namespaces = */ Default::default(),
             None,
             None,

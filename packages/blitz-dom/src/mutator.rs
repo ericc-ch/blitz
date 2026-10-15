@@ -192,7 +192,11 @@ impl DocumentMutator<'_> {
 
     pub fn create_element(&mut self, name: QualName, attrs: Vec<Attribute>) -> NodeId {
         let mut data = ElementData::new(name, attrs);
-        data.flush_style_attribute(self.doc.guard(), &self.doc.url.url_extra_data());
+        data.flush_style_attribute(
+            self.doc.guard(),
+            &self.doc.url.url_extra_data(),
+            self.doc.quirks_mode(),
+        );
 
         // A new HTML `template` element is born with empty template contents
         // (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
@@ -343,6 +347,7 @@ impl DocumentMutator<'_> {
     }
 
     pub fn set_attribute(&mut self, node_id: NodeId, name: QualName, value: &str) {
+        let quirks = self.doc.quirks_mode();
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
         if node_is_in_document {
             self.doc.snapshot_node(node_id);
@@ -414,16 +419,7 @@ impl DocumentMutator<'_> {
         }
 
         element.attrs.set(name.clone(), value);
-        if name.local == local_name!("value") {
-            if let Some(input_data) = element.text_input_data_mut() {
-                input_data.set_text(
-                    &mut self.doc.font_ctx.lock().unwrap(),
-                    &mut self.doc.layout_ctx,
-                    value,
-                );
-            }
-        }
-        if refresh_placeholder {
+        if refresh_placeholder && name.local != local_name!("value") {
             element.sync_placeholder_shown(textarea_text_empty);
         }
 
@@ -450,11 +446,25 @@ impl DocumentMutator<'_> {
         }
 
         if *attr == local_name!("value") {
+            // A dirty value keeps the current value when the attribute changes
+            // (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>).
+            if !element.form_state.dirty_value
+                && let Some(input_data) = element.text_input_data_mut()
+            {
+                input_data.set_text(
+                    &mut self.doc.font_ctx.lock().unwrap(),
+                    &mut self.doc.layout_ctx,
+                    value,
+                );
+            }
+            if refresh_placeholder {
+                element.sync_placeholder_shown(textarea_text_empty);
+            }
             return;
         }
 
         if *attr == local_name!("style") {
-            element.flush_style_attribute(&self.doc.guard, &self.doc.url.url_extra_data());
+            element.flush_style_attribute(&self.doc.guard, &self.doc.url.url_extra_data(), quirks);
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
             return;
         }
@@ -477,7 +487,14 @@ impl DocumentMutator<'_> {
         }
 
         if (tag, attr) == tag_and_attr!("input", "checked") {
-            set_input_checked_state(element, value.to_string());
+            if !element.form_state.dirty_checkedness {
+                set_input_checked_state(element, value.to_string());
+                element.element_state.insert(ElementState::CHECKED);
+            }
+        } else if (tag, attr) == tag_and_attr!("option", "selected") {
+            if !element.form_state.dirty_selectedness {
+                element.element_state.insert(ElementState::CHECKED);
+            }
         } else if (tag, attr) == tag_and_attr!("img", "src") {
             self.load_image(node_id);
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
@@ -494,6 +511,7 @@ impl DocumentMutator<'_> {
     }
 
     pub fn clear_attribute(&mut self, node_id: NodeId, name: QualName) {
+        let quirks = self.doc.quirks_mode();
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
         if node_is_in_document {
             self.doc.snapshot_node(node_id);
@@ -572,7 +590,7 @@ impl DocumentMutator<'_> {
             element.flush_link_state();
         }
 
-        if name.local == local_name!("value") {
+        if name.local == local_name!("value") && !element.form_state.dirty_value {
             if let Some(input_data) = element.text_input_data_mut() {
                 input_data.set_text(
                     &mut self.doc.font_ctx.lock().unwrap(),
@@ -594,10 +612,16 @@ impl DocumentMutator<'_> {
         }
 
         if *attr == local_name!("style") {
-            element.flush_style_attribute(&self.doc.guard, &self.doc.url.url_extra_data());
+            element.flush_style_attribute(&self.doc.guard, &self.doc.url.url_extra_data(), quirks);
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         } else if (tag, attr) == tag_and_attr!("input", "checked") {
-            element.set_checkbox_input_checked(false);
+            if !element.form_state.dirty_checkedness {
+                element.set_checkbox_input_checked(false);
+            }
+        } else if (tag, attr) == tag_and_attr!("option", "selected") {
+            if !element.form_state.dirty_selectedness {
+                element.element_state.remove(ElementState::CHECKED);
+            }
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.recompute_is_animating = true;
         } else if (tag, attr) == tag_and_attr!("link", "href") {
@@ -606,6 +630,79 @@ impl DocumentMutator<'_> {
             // Fall back to loading from the `src` attribute (if any)
             self.load_iframe(node_id);
         }
+    }
+
+    /// Sets the dirty value and refreshes `:placeholder-shown`. The content
+    /// attribute stays the default value
+    /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-value>).
+    pub fn set_dirty_value(&mut self, node_id: NodeId, value: String) {
+        self.doc
+            .snapshot_node_and(node_id, ElementState::PLACEHOLDER_SHOWN, |node| {
+                if let Some(element) = node.element_data_mut() {
+                    element.store_dirty_value(value.clone());
+                }
+            });
+        // Once layout builds an editor it is the live value, so the text must
+        // follow the dirty value or the selection APIs and `:placeholder-shown`
+        // disagree with `value`
+        // (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#set-the-selection-range>).
+        let node = &mut self.doc.nodes[node_id];
+        if let Some(element) = node.element_data_mut()
+            && let Some(input_data) = element.text_input_data_mut()
+        {
+            input_data.set_text(
+                &mut self.doc.font_ctx.lock().unwrap(),
+                &mut self.doc.layout_ctx,
+                &value,
+            );
+        }
+    }
+
+    /// Sets dirty checkedness without writing the `checked` attribute
+    /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-checked>).
+    pub fn set_checkedness(&mut self, node_id: NodeId, checked: bool) {
+        self.doc
+            .snapshot_node_and(node_id, ElementState::CHECKED, |node| {
+                if let Some(element) = node.element_data_mut() {
+                    element.store_checkedness(checked);
+                }
+            });
+    }
+
+    /// Sets dirty selectedness without writing the `selected` attribute
+    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#dom-option-selected>).
+    pub fn set_selectedness(&mut self, node_id: NodeId, selected: bool) {
+        self.doc
+            .snapshot_node_and(node_id, ElementState::CHECKED, |node| {
+                if let Some(element) = node.element_data_mut() {
+                    element.store_selectedness(selected);
+                }
+            });
+    }
+
+    /// Sets the indeterminate flag
+    /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-indeterminate>).
+    pub fn set_indeterminate(&mut self, node_id: NodeId, indeterminate: bool) {
+        self.doc
+            .snapshot_node_and(node_id, ElementState::INDETERMINATE, |node| {
+                if let Some(element) = node.element_data_mut() {
+                    element.store_indeterminate(indeterminate);
+                }
+            });
+    }
+
+    /// Clears dirty form state so attributes and descendant text apply again.
+    pub fn reset_control(&mut self, node_id: NodeId) {
+        let text_empty = self.doc.nodes[node_id].text_content().is_empty();
+        self.doc.snapshot_node_and(
+            node_id,
+            ElementState::CHECKED | ElementState::INDETERMINATE | ElementState::PLACEHOLDER_SHOWN,
+            |node| {
+                if let Some(element) = node.element_data_mut() {
+                    element.reset_control_state(text_empty);
+                }
+            },
+        );
     }
 
     pub fn set_style_property(&mut self, node_id: NodeId, name: &str, value: &str) {

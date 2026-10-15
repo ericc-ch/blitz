@@ -1,7 +1,10 @@
 //! Versioned storage for the nodes of the DOM tree.
 
+use std::cell::Cell;
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use selectors::matching::QuirksMode;
 
 use blitz_traits::node_id::NodeId;
 use slotmap::{Key as _, KeyData, SlotMap};
@@ -41,6 +44,12 @@ pub struct NodeTree {
     /// Scroll offset of the viewport (the root element scrolls the viewport,
     /// so its offset lives here rather than on the node).
     viewport_scroll: crate::Point<f64>,
+    /// The document's quirks mode. Nodes read it through their tree pointer
+    /// during style matching
+    /// (<https://drafts.csswg.org/css-cascade/#cascading-origins>).
+    quirks_mode: Cell<QuirksMode>,
+    /// Set when the caller supplied a mode. The parser must not replace it.
+    quirks_locked: Cell<bool>,
 }
 
 impl NodeTree {
@@ -49,7 +58,25 @@ impl NodeTree {
             map: SlotMap::with_key(),
             geometry_generation: AtomicU64::new(1),
             viewport_scroll: crate::Point::ZERO,
+            quirks_mode: Cell::new(QuirksMode::NoQuirks),
+            quirks_locked: Cell::new(false),
         }
+    }
+
+    pub fn quirks_mode(&self) -> QuirksMode {
+        self.quirks_mode.get()
+    }
+
+    pub(crate) fn set_quirks_mode(&self, mode: QuirksMode) {
+        self.quirks_mode.set(mode);
+    }
+
+    pub(crate) fn quirks_locked(&self) -> bool {
+        self.quirks_locked.get()
+    }
+
+    pub(crate) fn lock_quirks_mode(&self) {
+        self.quirks_locked.set(true);
     }
 
     pub fn viewport_scroll(&self) -> crate::Point<f64> {
