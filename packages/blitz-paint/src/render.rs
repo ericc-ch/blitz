@@ -613,7 +613,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // unreachable!()
             }
             NodeData::Document(_) => {}
-            NodeData::Fragment { .. } => {}
+            NodeData::Fragment { .. } | NodeData::ShadowRoot { .. } => {}
             NodeData::Doctype { .. } => {}
             NodeData::Comment { .. } => {}
             NodeData::ProcessingInstruction { .. } => {}

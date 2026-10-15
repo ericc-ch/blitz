@@ -164,7 +164,7 @@ impl Node {
                 writer.push_str(contents);
                 writer.push_str("]]>");
             }
-            NodeData::Fragment { .. } => {
+            NodeData::Fragment { .. } | NodeData::ShadowRoot { .. } => {
                 for &child_id in &self.children {
                     self.tree()[child_id].write_outer_html_in_style(writer, opts, nesting + 1);
                 }

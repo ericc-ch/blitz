@@ -1451,10 +1451,15 @@ impl BaseDocument {
         let element = &mut self.nodes[node_id].element_data_mut().unwrap();
         element.special_data = SpecialElementData::Stylesheet(stylesheet.clone());
 
-        // Cascade order follows the owner node's tree order, not its id.
-        // `moveBefore` changes document position without changing the id, so
-        // ordering by id left the sheet where it was first inserted
-        // (<https://drafts.csswg.org/cssom/#concept-document-or-shadow-root-css-style-sheets>).
+        self.insert_stylesheet_in_tree_order(node_id, stylesheet);
+    }
+
+    /// Put `stylesheet`, already owned by `node_id`, back into the stylist at
+    /// the owner's current tree position. Does not fetch fonts or replace the
+    /// stored sheet: `move` changes document order without the load steps
+    /// (<https://dom.spec.whatwg.org/#concept-node-move>,
+    /// <https://drafts.csswg.org/cssom/#concept-document-or-shadow-root-css-style-sheets>).
+    fn insert_stylesheet_in_tree_order(&mut self, node_id: NodeId, stylesheet: DocumentStyleSheet) {
         let insertion_point = self
             .nodes_to_stylesheet
             .iter()
@@ -1468,18 +1473,54 @@ impl BaseDocument {
                     std::cmp::Ordering::Greater
                 }
             })
-            .map(|(_, sheet)| sheet);
+            .map(|(_, sheet)| sheet.clone());
 
         if let Some(insertion_point) = insertion_point {
-            self.stylist.insert_stylesheet_before(
-                stylesheet,
-                insertion_point.clone(),
-                &self.guard.read(),
-            )
+            self.stylist
+                .insert_stylesheet_before(stylesheet, insertion_point, &self.guard.read())
         } else {
             self.stylist
                 .append_stylesheet(stylesheet, &self.guard.read())
         }
+    }
+
+    /// Re-seat every stylesheet whose owner is in `root`'s subtree so cascade
+    /// position follows the tree after a move.
+    pub fn reorder_stylesheets_in_subtree(&mut self, root: NodeId) {
+        let mut owners: Vec<NodeId> = self
+            .nodes_to_stylesheet
+            .keys()
+            .copied()
+            .filter(|owner| self.is_inclusive_descendant(*owner, root))
+            .collect();
+        owners.sort_by(|left, right| {
+            if self.precedes_in_tree_order(*left, *right) {
+                std::cmp::Ordering::Less
+            } else if self.precedes_in_tree_order(*right, *left) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        for owner in owners {
+            let Some(stylesheet) = self.nodes_to_stylesheet.get(&owner).cloned() else {
+                continue;
+            };
+            self.stylist
+                .remove_stylesheet(stylesheet.clone(), &self.guard.read());
+            self.insert_stylesheet_in_tree_order(owner, stylesheet);
+        }
+    }
+
+    fn is_inclusive_descendant(&self, node: NodeId, ancestor: NodeId) -> bool {
+        let mut current = Some(node);
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            current = self.nodes[id].parent;
+        }
+        false
     }
 
     pub fn handle_messages(&mut self) {
@@ -3795,5 +3836,72 @@ mod cascade_position_tests {
                 .contains(style_dom::ElementState::PLACEHOLDER_SHOWN),
             "PLACEHOLDER_SHOWN follows the editor"
         );
+    }
+
+    #[test]
+    fn move_node_reorders_sheets_without_reloading_them() {
+        let mut doc = document();
+        let root = doc.root_node().id;
+        let (first, second, paragraph) = {
+            let mut mutator = doc.mutate();
+            let html = mutator.create_element(qual_name!("html"), vec![]);
+            let body = mutator.create_element(qual_name!("body"), vec![]);
+            let first = mutator.create_element(qual_name!("style"), vec![]);
+            let first_text = mutator.create_text_node("p { color: rgb(1, 0, 0); }");
+            mutator.append_children(first, &[first_text]);
+            let second = mutator.create_element(qual_name!("style"), vec![]);
+            let second_text = mutator.create_text_node("p { color: rgb(0, 0, 1); }");
+            mutator.append_children(second, &[second_text]);
+            let paragraph = mutator.create_element(qual_name!("p"), vec![]);
+            mutator.append_children(body, &[first, second, paragraph]);
+            mutator.append_children(html, &[body]);
+            mutator.append_children(root, &[html]);
+            (first, second, paragraph)
+        };
+        doc.resolve(0.0);
+        let before = text_color(&doc, paragraph);
+        let generation = doc.stylesheet_generation;
+        let parent = doc.nodes[first].parent.unwrap();
+        {
+            let mut mutator = doc.mutate();
+            mutator.move_node(first, parent, None);
+        }
+        assert_eq!(
+            doc.stylesheet_generation, generation,
+            "a move does not rebuild the sheet"
+        );
+        assert!(doc.nodes[first].flags.is_in_document());
+        doc.resolve(0.0);
+        assert_ne!(
+            before,
+            text_color(&doc, paragraph),
+            "moving the earlier sheet after the later one should change the winning color"
+        );
+        let _ = second;
+    }
+
+    #[test]
+    fn shadow_root_hosts_its_children() {
+        let mut doc = document();
+        let root = doc.root_node().id;
+        let (div, shadow, child) = {
+            let mut mutator = doc.mutate();
+            let html = mutator.create_element(qual_name!("html"), vec![]);
+            let body = mutator.create_element(qual_name!("body"), vec![]);
+            let div = mutator.create_element(qual_name!("div"), vec![]);
+            mutator.append_children(body, &[div]);
+            mutator.append_children(html, &[body]);
+            mutator.append_children(root, &[html]);
+            let shadow = mutator.attach_shadow_root(div, false);
+            let child = mutator.create_element(qual_name!("span"), vec![]);
+            mutator.append_children(shadow, &[child]);
+            (div, shadow, child)
+        };
+        assert_eq!(
+            doc.nodes[div].element_data().unwrap().shadow_root,
+            Some(shadow)
+        );
+        assert_eq!(doc.nodes[child].parent, Some(shadow));
+        doc.resolve(0.0);
     }
 }

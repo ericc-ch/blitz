@@ -843,6 +843,7 @@ pub enum NodeKind {
     ProcessingInstruction,
     CDataSection,
     Fragment,
+    ShadowRoot,
 }
 
 /// The different kinds of nodes in the DOM.
@@ -906,6 +907,16 @@ pub enum NodeData {
         /// The template element hosting these contents, if any.
         host: Option<NodeId>,
     },
+
+    /// A shadow root. It is a document fragment whose host element is
+    /// `host`, and it is not a child of that host
+    /// (<https://dom.spec.whatwg.org/#interface-shadowroot>).
+    ShadowRoot {
+        /// The element that hosts this shadow tree.
+        host: NodeId,
+        /// `true` when the mode is `"closed"`.
+        closed: bool,
+    },
 }
 
 impl NodeData {
@@ -956,6 +967,7 @@ impl NodeData {
             NodeData::ProcessingInstruction { .. } => NodeKind::ProcessingInstruction,
             NodeData::CDataSection { .. } => NodeKind::CDataSection,
             NodeData::Fragment { .. } => NodeKind::Fragment,
+            NodeData::ShadowRoot { .. } => NodeKind::ShadowRoot,
         }
     }
 }
@@ -1107,6 +1119,7 @@ impl Node {
             NodeData::ProcessingInstruction { target, .. } => write!(s, "PI {target}"),
             NodeData::CDataSection { .. } => write!(s, "CDATA"),
             NodeData::Fragment { .. } => write!(s, "FRAGMENT"),
+            NodeData::ShadowRoot { .. } => write!(s, "SHADOW-ROOT"),
             NodeData::Text(data) => {
                 let bytes = data.content.as_bytes();
                 write!(
@@ -1307,7 +1320,7 @@ impl Node {
                 out.push_str(contents);
             }
             // A fragment contributes its children's text.
-            NodeData::Fragment { .. } => {
+            NodeData::Fragment { .. } | NodeData::ShadowRoot { .. } => {
                 for child_id in self.children.iter() {
                     self.tree()[*child_id].write_text_content(out);
                 }

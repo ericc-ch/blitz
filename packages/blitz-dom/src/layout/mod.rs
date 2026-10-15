@@ -918,6 +918,7 @@ impl PrintTree for TaffyDebugTree<'_> {
             NodeData::Text { .. } => node.node_debug_str().leak(),
             NodeData::Comment { .. } => "COMMENT",
             NodeData::Fragment { .. } => "FRAGMENT",
+            NodeData::ShadowRoot { .. } => "SHADOW-ROOT",
             NodeData::ProcessingInstruction { .. } => "PROCESSING INSTRUCTION",
             NodeData::CDataSection { .. } => "CDATA",
             NodeData::AnonymousBlock(_) => "ANONYMOUS BLOCK",

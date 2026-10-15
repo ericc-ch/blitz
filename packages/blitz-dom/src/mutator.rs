@@ -30,6 +30,17 @@ pub enum AppendTextErr {
     NotTextNode,
 }
 
+fn node_inside_shadow(doc: &BaseDocument, node_id: NodeId) -> bool {
+    let mut current = doc.nodes[node_id].parent;
+    while let Some(id) = current {
+        if matches!(doc.nodes[id].data, NodeData::ShadowRoot { .. }) {
+            return true;
+        }
+        current = doc.nodes[id].parent;
+    }
+    false
+}
+
 /// Operations that happen almost immediately, but are deferred within a
 /// function for borrow-checker reasons.
 enum SpecialOp {
@@ -1055,6 +1066,7 @@ impl<'doc> DocumentMutator<'doc> {
                 doc.add_to_id_map(&id_attr, node_id);
             }
 
+            let in_shadow = node_inside_shadow(doc, node_id);
             let node = &mut doc.nodes[node_id];
             let NodeData::Element(ref mut element) = node.data else {
                 return;
@@ -1070,11 +1082,13 @@ impl<'doc> DocumentMutator<'doc> {
             let tag = element.name.local.as_ref();
             match tag {
                 "title" => self.title_node = Some(node_id),
-                "style" => {
+                "style" if !in_shadow => {
                     self.style_nodes.insert(node_id);
                 }
                 _ if has_custom_widget => {}
-                "link" => self.eager_op_queue.push(SpecialOp::LoadStylesheet(node_id)),
+                "link" if !in_shadow => {
+                    self.eager_op_queue.push(SpecialOp::LoadStylesheet(node_id))
+                }
                 "img" => self.eager_op_queue.push(SpecialOp::LoadImage(node_id)),
                 "iframe" => self.eager_op_queue.push(SpecialOp::LoadIframe(node_id)),
                 "canvas" => self
@@ -1102,6 +1116,11 @@ impl<'doc> DocumentMutator<'doc> {
                 }
             }
         });
+
+        let shadows = self.shadow_roots_under(node_id);
+        for shadow in shadows {
+            self.process_added_subtree(shadow);
+        }
 
         self.flush_eager_ops();
     }
@@ -1171,7 +1190,89 @@ impl<'doc> DocumentMutator<'doc> {
             }
         });
 
+        let shadows = self.shadow_roots_under(node_id);
+        for shadow in shadows {
+            self.process_removed_subtree(shadow);
+        }
+
         self.flush_eager_ops();
+    }
+
+    /// Shadow roots hosted by elements in the light subtree of `node_id`.
+    /// The walk does not enter those shadow trees.
+    fn shadow_roots_under(&self, node_id: NodeId) -> Vec<NodeId> {
+        let mut found = Vec::new();
+        let mut stack = vec![node_id];
+        while let Some(id) = stack.pop() {
+            if let Some(shadow) = self.doc.nodes[id]
+                .element_data()
+                .and_then(|element| element.shadow_root)
+            {
+                found.push(shadow);
+            }
+            stack.extend(self.doc.nodes[id].children.iter().copied());
+        }
+        found
+    }
+
+    /// Whether `node_id` is inside a shadow tree (not the shadow root itself).
+    fn inside_shadow(&self, node_id: NodeId) -> bool {
+        let mut current = self.doc.nodes[node_id].parent;
+        while let Some(id) = current {
+            if matches!(self.doc.nodes[id].data, NodeData::ShadowRoot { .. }) {
+                return true;
+            }
+            current = self.doc.nodes[id].parent;
+        }
+        false
+    }
+
+    /// Attach a shadow root to `host`. The root is not a child of the host
+    /// (<https://dom.spec.whatwg.org/#concept-attach-a-shadow-root>).
+    pub fn attach_shadow_root(&mut self, host: NodeId, closed: bool) -> NodeId {
+        let id = self.doc.create_node(NodeData::ShadowRoot { host, closed });
+        if let Some(element) = self.doc.nodes[host].element_data_mut() {
+            element.shadow_root = Some(id);
+        }
+        if self.doc.nodes[host].flags.is_in_document() {
+            self.doc.nodes[id]
+                .flags
+                .set(NodeFlags::IS_IN_DOCUMENT, true);
+        }
+        id
+    }
+
+    /// Reparent `node_id` under `parent_id` before `before` without the
+    /// insertion or removing steps
+    /// (<https://dom.spec.whatwg.org/#concept-node-move>).
+    pub fn move_node(&mut self, node_id: NodeId, parent_id: NodeId, before: Option<NodeId>) {
+        let old_parent = self.doc.nodes[node_id].parent.take();
+        if let Some(old_parent) = old_parent {
+            self.doc.nodes[old_parent]
+                .children
+                .retain(|id| *id != node_id);
+            self.doc.nodes[old_parent].insert_damage(ALL_DAMAGE);
+        }
+        {
+            let parent = &mut self.doc.nodes[parent_id];
+            parent.insert_damage(ALL_DAMAGE);
+            match before {
+                Some(before) => {
+                    let index = parent
+                        .children
+                        .iter()
+                        .position(|id| *id == before)
+                        .expect("move reference is a child of the new parent");
+                    parent.children.insert(index, node_id);
+                }
+                None => parent.children.push(node_id),
+            }
+        }
+        self.doc.nodes[node_id].parent = Some(parent_id);
+        self.doc.nodes[node_id].insert_damage(ALL_DAMAGE);
+        self.doc.nodes[node_id].mark_ancestors_dirty();
+        self.doc.reorder_stylesheets_in_subtree(node_id);
+        self.mutations_occurred = true;
     }
 
     fn maybe_record_node(&mut self, node_id: impl Into<Option<NodeId>>) {
@@ -1189,7 +1290,7 @@ impl<'doc> DocumentMutator<'doc> {
 
         match tag_name.as_ref() {
             "title" => self.title_node = Some(node_id),
-            "style" => {
+            "style" if !self.inside_shadow(node_id) => {
                 self.style_nodes.insert(node_id);
             }
             _ => {}

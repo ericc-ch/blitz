@@ -78,6 +78,10 @@ pub struct ElementData {
 
     /// The element's template contents (\<template\> elements only)
     pub template_contents: Option<NodeId>,
+
+    /// The shadow root this element hosts, if it is a shadow host
+    /// (<https://dom.spec.whatwg.org/#dom-element-shadowroot>).
+    pub shadow_root: Option<NodeId>,
     // /// Whether the node is a [HTML integration point] (https://html.spec.whatwg.org/multipage/#html-integration-point)
     // pub mathml_annotation_xml_integration_point: bool,
 
@@ -309,6 +313,10 @@ impl Clone for ElementData {
             inline_layout_data: self.inline_layout_data.clone(),
             list_item_data: self.list_item_data.clone(),
             template_contents: self.template_contents,
+            // `clonable` is false unless script opts in, and a non-clonable
+            // host's clone does not copy its shadow tree
+            // (<https://dom.spec.whatwg.org/#concept-node-clone>).
+            shadow_root: None,
 
             // Runtime state: reset to defaults.
             stylo_element_data: Default::default(),
@@ -415,6 +423,7 @@ impl ElementData {
             list_item_data: None,
             special_data: SpecialElementData::None,
             template_contents: None,
+            shadow_root: None,
             background_images: ThinVec::new(),
             mask_images: ThinVec::new(),
 

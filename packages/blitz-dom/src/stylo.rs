@@ -285,14 +285,20 @@ impl<'a> TShadowRoot for BlitzNode<'a> {
     }
 
     fn host(&self) -> <Self::ConcreteNode as TNode>::ConcreteElement {
-        todo!("Shadow roots not implemented")
+        let NodeData::ShadowRoot { host, .. } = self.data else {
+            panic!("host() on a node that is not a shadow root");
+        };
+        self.with(host)
     }
 
     fn style_data<'b>(&self) -> Option<&'b style::stylist::CascadeData>
     where
         Self: 'b,
     {
-        todo!("Shadow roots not implemented")
+        // Shadow-scoped cascade data is not built yet. `None` keeps
+        // document author rules out of the shadow tree
+        // (<https://drafts.csswg.org/css-scoping/#shadow-trees>).
+        None
     }
 }
 
@@ -366,8 +372,10 @@ impl<'a> TNode for BlitzNode<'a> {
     }
 
     fn as_shadow_root(&self) -> Option<Self::ConcreteShadowRoot> {
-        // TODO: implement shadow DOM
-        None
+        match self.data {
+            NodeData::ShadowRoot { .. } => Some(self),
+            _ => None,
+        }
     }
 }
 
@@ -392,11 +400,12 @@ impl selectors::Element for BlitzNode<'_> {
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
-        false
+        self.parent_node()
+            .is_some_and(|parent| parent.as_shadow_root().is_some())
     }
 
     fn containing_shadow_host(&self) -> Option<Self> {
-        None
+        TElement::containing_shadow(self).map(|root| root.host())
     }
 
     fn is_pseudo_element(&self) -> bool {
@@ -841,10 +850,18 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn shadow_root(&self) -> Option<<Self::ConcreteNode as TNode>::ConcreteShadowRoot> {
-        None
+        let id = self.data.downcast_element()?.shadow_root?;
+        Some(self.with(id))
     }
 
     fn containing_shadow(&self) -> Option<<Self::ConcreteNode as TNode>::ConcreteShadowRoot> {
+        let mut current = self.parent_node();
+        while let Some(node) = current {
+            if node.as_shadow_root().is_some() {
+                return Some(node);
+            }
+            current = node.parent_node();
+        }
         None
     }
 
