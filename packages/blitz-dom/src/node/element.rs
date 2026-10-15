@@ -457,6 +457,9 @@ impl ElementData {
                 });
         }
 
+        // A newly built control has no child text yet.
+        data.sync_placeholder_shown(true);
+
         data
     }
 
@@ -487,6 +490,69 @@ impl ElementData {
     pub fn is_link(&self) -> bool {
         (self.name.local == local_name!("a") || self.name.local == local_name!("area"))
             && self.has_attr(local_name!("href"))
+    }
+
+    /// Keep [`ElementState::PLACEHOLDER_SHOWN`] aligned with whether this
+    /// control is showing its placeholder.
+    ///
+    /// An `input` shows it when its type is a textual state (a missing or
+    /// unknown type is the text state), its placeholder attribute is
+    /// non-empty, and its value attribute is empty. A `textarea` shows it
+    /// when its placeholder is non-empty and `textarea_text_empty` is set.
+    ///
+    /// <https://drafts.csswg.org/selectors/#placeholder-shown-pseudo>
+    /// <https://html.spec.whatwg.org/multipage/input.html#the-placeholder-attribute>
+    /// <https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element>
+    pub fn sync_placeholder_shown(&mut self, textarea_text_empty: bool) {
+        let shown = self.placeholder_is_shown(textarea_text_empty);
+        self.element_state
+            .set(ElementState::PLACEHOLDER_SHOWN, shown);
+    }
+
+    fn placeholder_is_shown(&self, textarea_text_empty: bool) -> bool {
+        let placeholder = self.attr(local_name!("placeholder")).unwrap_or("");
+        if placeholder.is_empty() {
+            return false;
+        }
+        match self.name.local.as_ref() {
+            "textarea" => textarea_text_empty,
+            "input" => {
+                self.input_placeholder_applies()
+                    && self.attr(local_name!("value")).unwrap_or("").is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    /// Placeholder applies to the text, search, url, tel, email, password,
+    /// and number states. Every other known type does not. A missing or
+    /// unknown type uses the text state.
+    ///
+    /// <https://html.spec.whatwg.org/multipage/input.html#attr-input-type>
+    fn input_placeholder_applies(&self) -> bool {
+        let kind = self
+            .attr(local_name!("type"))
+            .unwrap_or("text")
+            .trim()
+            .to_ascii_lowercase();
+        !matches!(
+            kind.as_str(),
+            "hidden"
+                | "checkbox"
+                | "radio"
+                | "file"
+                | "submit"
+                | "image"
+                | "reset"
+                | "button"
+                | "color"
+                | "range"
+                | "date"
+                | "month"
+                | "week"
+                | "time"
+                | "datetime-local"
+        )
     }
 
     /// Sync the visitedness bits of `element_state` with the element's link-ness.

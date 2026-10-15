@@ -1281,6 +1281,21 @@ impl Node {
         out
     }
 
+    /// Recompute [`ElementState::PLACEHOLDER_SHOWN`] from this control's
+    /// attributes and, for a `textarea`, its text content.
+    pub fn flush_placeholder_shown(&mut self) {
+        let is_control = self
+            .element_data()
+            .is_some_and(|element| matches!(element.name.local.as_ref(), "input" | "textarea"));
+        if !is_control {
+            return;
+        }
+        let text_empty = self.text_content().is_empty();
+        if let Some(element) = self.element_data_mut() {
+            element.sync_placeholder_shown(text_empty);
+        }
+    }
+
     fn write_text_content(&self, out: &mut String) {
         match &self.data {
             NodeData::Text(data) => {

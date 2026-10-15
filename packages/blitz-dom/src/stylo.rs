@@ -234,6 +234,13 @@ impl crate::document::BaseDocument {
     }
 }
 
+/// Whether this control is showing its placeholder
+/// (<https://drafts.csswg.org/selectors/#placeholder-shown-pseudo>).
+///
+/// Textual inputs and textareas show the placeholder while their value is
+/// the empty string and the placeholder attribute is not empty. Other input
+/// types do not support the attribute
+/// (<https://html.spec.whatwg.org/multipage/input.html#attr-input-placeholder>).
 /// A handle to a node that Servo's style traits are implemented against
 ///
 /// Since BlitzNodes are not persistent (IE we don't keep the pointers around between frames), we choose to just implement
@@ -487,7 +494,13 @@ impl selectors::Element for BlitzNode<'_> {
             NonTSPseudoClass::Lang(_) => false,
             NonTSPseudoClass::CustomState(_) => false,
             NonTSPseudoClass::Link => self.element_state().contains(ElementState::UNVISITED),
-            NonTSPseudoClass::PlaceholderShown => false,
+            // The bit is maintained by `ElementData::sync_placeholder_shown`.
+            // Stylo shares styles by `ElementState`, so matching has to read
+            // the bit rather than recompute from attributes.
+            // <https://drafts.csswg.org/selectors/#placeholder-shown-pseudo>
+            NonTSPseudoClass::PlaceholderShown => self
+                .element_state()
+                .contains(ElementState::PLACEHOLDER_SHOWN),
             NonTSPseudoClass::ReadWrite => false,
             NonTSPseudoClass::ReadOnly => false,
             NonTSPseudoClass::ServoNonZeroBorder => false,

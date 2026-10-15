@@ -33,7 +33,7 @@ use selectors::{Element, matching::QuirksMode};
 use smallvec::SmallVec;
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, Bound, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::str::FromStr;
@@ -1111,10 +1111,7 @@ impl BaseDocument {
         if let Some(old_contents) = old_contents {
             if self.get_node(old_contents).is_some() {
                 let new_contents = self.deep_clone_node(old_contents);
-                if let Some(data) = self.nodes[new_node_id]
-                    .data
-                    .downcast_element_mut()
-                {
+                if let Some(data) = self.nodes[new_node_id].data.downcast_element_mut() {
                     data.template_contents = Some(new_contents);
                 }
                 if let Some(NodeData::Fragment { host }) =
@@ -1122,10 +1119,7 @@ impl BaseDocument {
                 {
                     *host = Some(new_node_id);
                 }
-            } else if let Some(data) = self.nodes[new_node_id]
-                .data
-                .downcast_element_mut()
-            {
+            } else if let Some(data) = self.nodes[new_node_id].data.downcast_element_mut() {
                 // Original fragment is gone: clear the stale id rather than
                 // pointing at a dead node.
                 data.template_contents = None;
@@ -1133,10 +1127,8 @@ impl BaseDocument {
         }
 
         // A directly cloned fragment is nobody's contents.
-        if let Some(NodeData::Fragment { host }) = self
-            .nodes
-            .get_mut(new_node_id)
-            .map(|node| &mut node.data)
+        if let Some(NodeData::Fragment { host }) =
+            self.nodes.get_mut(new_node_id).map(|node| &mut node.data)
         {
             *host = None;
         }
@@ -1358,6 +1350,77 @@ impl BaseDocument {
         }
     }
 
+    /// Whether `earlier` comes before `later` in tree order
+    /// (<https://dom.spec.whatwg.org/#concept-tree-order>).
+    ///
+    /// An ancestor precedes its descendants. Nodes in different trees do not
+    /// precede each other.
+    pub fn precedes_in_tree_order(&self, earlier: NodeId, later: NodeId) -> bool {
+        if earlier == later {
+            return false;
+        }
+        let earlier_chain = self.inclusive_ancestor_chain(earlier);
+        let later_chain = self.inclusive_ancestor_chain(later);
+        let (Some(earlier_root), Some(later_root)) =
+            (earlier_chain.last().copied(), later_chain.last().copied())
+        else {
+            return false;
+        };
+        if earlier_root != later_root {
+            return false;
+        }
+        let mut shared = 0;
+        while shared < earlier_chain.len()
+            && shared < later_chain.len()
+            && earlier_chain[earlier_chain.len() - 1 - shared]
+                == later_chain[later_chain.len() - 1 - shared]
+        {
+            shared += 1;
+        }
+        if shared == earlier_chain.len() {
+            return true;
+        }
+        if shared == later_chain.len() {
+            return false;
+        }
+        let parent = earlier_chain[earlier_chain.len() - shared];
+        let earlier_child = earlier_chain[earlier_chain.len() - shared - 1];
+        let later_child = later_chain[later_chain.len() - shared - 1];
+        let Some(parent_node) = self.get_node(parent) else {
+            return false;
+        };
+        let Some(earlier_index) = parent_node
+            .children
+            .iter()
+            .position(|child| *child == earlier_child)
+        else {
+            return false;
+        };
+        let Some(later_index) = parent_node
+            .children
+            .iter()
+            .position(|child| *child == later_child)
+        else {
+            return false;
+        };
+        earlier_index < later_index
+    }
+
+    fn inclusive_ancestor_chain(&self, mut id: NodeId) -> Vec<NodeId> {
+        let mut chain = Vec::new();
+        loop {
+            if self.get_node(id).is_none() {
+                break;
+            }
+            chain.push(id);
+            let Some(parent) = self.nodes[id].parent else {
+                break;
+            };
+            id = parent;
+        }
+        chain
+    }
+
     pub fn add_stylesheet_for_node(&mut self, stylesheet: DocumentStyleSheet, node_id: NodeId) {
         // Inline sheets are same-document. A fetched `<link>` sheet overwrites
         // this with the response URL's origin-clean flag before script runs
@@ -1386,11 +1449,23 @@ impl BaseDocument {
         let element = &mut self.nodes[node_id].element_data_mut().unwrap();
         element.special_data = SpecialElementData::Stylesheet(stylesheet.clone());
 
-        // TODO: Nodes could potentially get reused so ordering by node_id might be wrong.
+        // Cascade order follows the owner node's tree order, not its id.
+        // `moveBefore` changes document position without changing the id, so
+        // ordering by id left the sheet where it was first inserted
+        // (<https://drafts.csswg.org/cssom/#concept-document-or-shadow-root-css-style-sheets>).
         let insertion_point = self
             .nodes_to_stylesheet
-            .range((Bound::Excluded(node_id), Bound::Unbounded))
-            .next()
+            .iter()
+            .filter(|(owner, _)| {
+                **owner != node_id && self.precedes_in_tree_order(node_id, **owner)
+            })
+            .min_by(|(left, _), (right, _)| {
+                if self.precedes_in_tree_order(**left, **right) {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            })
             .map(|(_, sheet)| sheet);
 
         if let Some(insertion_point) = insertion_point {
@@ -3539,6 +3614,117 @@ mod font_face_override_tests {
             resolved_name, ALIAS,
             "registered family should report the CSS-declared name, \
              not the font file's internal `name` table entry",
+        );
+    }
+}
+
+#[cfg(test)]
+mod cascade_position_tests {
+    use super::*;
+    use crate::{Attribute, UserAgentStylesheet, qual_name};
+    use blitz_traits::shell::ColorScheme;
+
+    fn text_color(doc: &BaseDocument, id: NodeId) -> String {
+        format!(
+            "{:?}",
+            doc.nodes[id].primary_styles().unwrap().clone_color()
+        )
+    }
+
+    fn document() -> BaseDocument {
+        BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn moving_a_style_element_moves_its_cascade_position() {
+        let mut doc = document();
+        let root = doc.root_node().id;
+        let (first, second, paragraph) = {
+            let mut mutator = doc.mutate();
+            let html = mutator.create_element(qual_name!("html"), vec![]);
+            let body = mutator.create_element(qual_name!("body"), vec![]);
+            let first = mutator.create_element(qual_name!("style"), vec![]);
+            let first_text = mutator.create_text_node("p { color: rgb(1, 0, 0); }");
+            mutator.append_children(first, &[first_text]);
+            let second = mutator.create_element(qual_name!("style"), vec![]);
+            let second_text = mutator.create_text_node("p { color: rgb(0, 0, 1); }");
+            mutator.append_children(second, &[second_text]);
+            let paragraph = mutator.create_element(qual_name!("p"), vec![]);
+            mutator.append_children(body, &[first, second, paragraph]);
+            mutator.append_children(html, &[body]);
+            mutator.append_children(root, &[html]);
+            (first, second, paragraph)
+        };
+        doc.resolve(0.0);
+        let before = text_color(&doc, paragraph);
+        {
+            let mut mutator = doc.mutate();
+            mutator.remove_node(second);
+            mutator.insert_nodes_before(first, &[second]);
+        }
+        doc.resolve(0.0);
+        let after = text_color(&doc, paragraph);
+        assert_ne!(
+            before, after,
+            "moving the later sheet before the earlier one should change the winning color"
+        );
+    }
+
+    #[test]
+    fn placeholder_shown_matches_an_empty_text_control() {
+        let mut doc = document();
+        doc.add_user_agent_stylesheet(UserAgentStylesheet::parse(
+            "input:placeholder-shown { color: rgb(9, 8, 7); }",
+        ));
+        let root = doc.root_node().id;
+        let (empty, filled) = {
+            let mut mutator = doc.mutate();
+            let html = mutator.create_element(qual_name!("html"), vec![]);
+            let body = mutator.create_element(qual_name!("body"), vec![]);
+            let empty = mutator.create_element(
+                qual_name!("input"),
+                vec![Attribute {
+                    name: qual_name!("placeholder"),
+                    value: "Search".into(),
+                }],
+            );
+            let filled = mutator.create_element(
+                qual_name!("input"),
+                vec![
+                    Attribute {
+                        name: qual_name!("placeholder"),
+                        value: "Search".into(),
+                    },
+                    Attribute {
+                        name: qual_name!("value"),
+                        value: "typed".into(),
+                    },
+                ],
+            );
+            mutator.append_children(body, &[empty, filled]);
+            mutator.append_children(html, &[body]);
+            mutator.append_children(root, &[html]);
+            (empty, filled)
+        };
+        doc.resolve(0.0);
+        assert_ne!(
+            text_color(&doc, empty),
+            text_color(&doc, filled),
+            "only the empty control shows its placeholder"
+        );
+
+        {
+            let mut mutator = doc.mutate();
+            mutator.set_attribute(filled, qual_name!("value"), "");
+        }
+        doc.resolve(0.0);
+        assert_eq!(
+            text_color(&doc, empty),
+            text_color(&doc, filled),
+            "clearing the value shows the placeholder"
         );
     }
 }

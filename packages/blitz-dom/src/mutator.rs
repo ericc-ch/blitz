@@ -15,6 +15,7 @@ use blitz_traits::shell::Viewport;
 use style::Atom;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::stylesheets::OriginSet;
+use style_dom::ElementState;
 use thin_vec::ThinVec;
 
 macro_rules! tag_and_attr {
@@ -137,12 +138,7 @@ impl DocumentMutator<'_> {
         })
     }
 
-    pub fn create_doctype_node(
-        &mut self,
-        name: &str,
-        public_id: &str,
-        system_id: &str,
-    ) -> NodeId {
+    pub fn create_doctype_node(&mut self, name: &str, public_id: &str, system_id: &str) -> NodeId {
         self.doc.create_node(NodeData::Doctype {
             name: name.to_string(),
             public_id: public_id.to_string(),
@@ -189,8 +185,8 @@ impl DocumentMutator<'_> {
 
         // A new HTML `template` element is born with empty template contents
         // (<https://html.spec.whatwg.org/multipage/scripting.html#the-template-element>).
-        let is_template =
-            data.name.ns == markup5ever::ns!(html) && data.name.local == markup5ever::local_name!("template");
+        let is_template = data.name.ns == markup5ever::ns!(html)
+            && data.name.local == markup5ever::local_name!("template");
 
         let id = self.doc.create_node(NodeData::Element(Box::new(data)));
         let node = self
@@ -287,6 +283,9 @@ impl DocumentMutator<'_> {
             }
 
             self.maybe_record_node(parent_id);
+            if let Some(parent_id) = parent_id {
+                self.note_placeholder_shown(parent_id);
+            }
         }
     }
 
@@ -299,10 +298,14 @@ impl DocumentMutator<'_> {
         let node = &mut self.doc.nodes[node_id];
         node.insert_damage(ALL_DAMAGE);
         node.mark_ancestors_dirty();
+        let parent_id = node.parent;
         match node.text_data_mut() {
             Some(data) => {
                 data.content += text;
                 self.mutations_occurred |= node_is_in_document;
+                if let Some(parent_id) = parent_id {
+                    self.note_placeholder_shown(parent_id);
+                }
                 Ok(())
             }
             None => Err(AppendTextErr::NotTextNode),
@@ -370,6 +373,19 @@ impl DocumentMutator<'_> {
             }
         }
 
+        let refresh_placeholder = matches!(
+            name.local,
+            ref local
+                if local == &local_name!("value")
+                    || local == &local_name!("placeholder")
+                    || local == &local_name!("type")
+        );
+        let textarea_text_empty = refresh_placeholder
+            && self.doc.nodes[node_id]
+                .element_data()
+                .is_some_and(|element| element.name.local == local_name!("textarea"))
+            && self.doc.nodes[node_id].text_content().is_empty();
+
         let node = &mut self.doc.nodes[node_id];
 
         let NodeData::Element(ref mut element) = node.data else {
@@ -387,6 +403,9 @@ impl DocumentMutator<'_> {
         }
 
         element.attrs.set(name.clone(), value);
+        if refresh_placeholder {
+            element.sync_placeholder_shown(textarea_text_empty);
+        }
 
         // Focusability is cached on the element and comes from these
         // attributes, so it has to follow a change to one of them: a widget
@@ -489,6 +508,19 @@ impl DocumentMutator<'_> {
             }
         }
 
+        let refresh_placeholder = matches!(
+            name.local,
+            ref local
+                if local == &local_name!("value")
+                    || local == &local_name!("placeholder")
+                    || local == &local_name!("type")
+        );
+        let textarea_text_empty = refresh_placeholder
+            && self.doc.nodes[node_id]
+                .element_data()
+                .is_some_and(|element| element.name.local == local_name!("textarea"))
+            && self.doc.nodes[node_id].text_content().is_empty();
+
         let node = &mut self.doc.nodes[node_id];
 
         let Some(element) = node.element_data_mut() else {
@@ -526,6 +558,10 @@ impl DocumentMutator<'_> {
 
         if name.local == local_name!("href") {
             element.flush_link_state();
+        }
+
+        if refresh_placeholder {
+            element.sync_placeholder_shown(textarea_text_empty);
         }
 
         // Update text input value
@@ -619,6 +655,7 @@ impl DocumentMutator<'_> {
             parent.mark_ancestors_dirty();
             parent.children.retain(|id| *id != node_id);
             self.maybe_record_node(parent_id);
+            self.note_placeholder_shown(parent_id);
         }
     }
 
@@ -659,6 +696,7 @@ impl DocumentMutator<'_> {
 
             parent.children.retain(|id| *id != node_id);
             self.maybe_record_node(parent_id);
+            self.note_placeholder_shown(parent_id);
         }
 
         node
@@ -764,6 +802,7 @@ impl DocumentMutator<'_> {
 
             old_parent.children.retain(|id| *id != child_id);
             self.maybe_record_node(old_parent_id);
+            self.note_placeholder_shown(old_parent_id);
         }
 
         let new_parent = &mut self.doc.nodes[parent_id];
@@ -796,6 +835,17 @@ impl DocumentMutator<'_> {
         }
 
         self.maybe_record_node(parent_id);
+        self.note_placeholder_shown(parent_id);
+    }
+
+    /// Snapshot, then recompute `:placeholder-shown` for a control whose text
+    /// content just changed. Attribute edits snapshot in `set_attribute` /
+    /// `clear_attribute` before they sync the bit.
+    fn note_placeholder_shown(&mut self, node_id: NodeId) {
+        self.doc
+            .snapshot_node_and(node_id, ElementState::PLACEHOLDER_SHOWN, |node| {
+                node.flush_placeholder_shown();
+            });
     }
 
     // Tree mutation methods (that defer to other methods)
