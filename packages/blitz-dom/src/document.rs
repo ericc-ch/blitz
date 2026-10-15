@@ -474,9 +474,15 @@ impl BaseDocument {
         let viewport = config.viewport.unwrap_or_default();
         let media_type = config.media_type.unwrap_or_else(MediaType::screen);
         let device = make_device(&viewport, media_type.clone(), font_ctx.clone());
-        let stylist = Stylist::new(device, QuirksMode::NoQuirks);
+        let quirks_mode = config.quirks_mode.unwrap_or(QuirksMode::NoQuirks);
+        let quirks_locked = config.quirks_mode.is_some();
+        let stylist = Stylist::new(device, quirks_mode);
         let snapshots = SnapshotMap::new();
         let nodes = Box::new(NodeTree::new());
+        nodes.set_quirks_mode(quirks_mode);
+        if quirks_locked {
+            nodes.lock_quirks_mode();
+        }
         let guard = SharedRwLock::new();
         let nodes_to_id = HashMap::new();
 
@@ -788,13 +794,32 @@ impl BaseDocument {
         self.shell_provider.request_redraw();
     }
 
+    /// The quirks mode style matching and author stylesheets use.
+    pub fn quirks_mode(&self) -> QuirksMode {
+        self.nodes.quirks_mode()
+    }
+
+    /// Applies a parser quirks mode unless the caller locked one in
+    /// [`DocumentConfig`](crate::DocumentConfig).
+    ///
+    /// <https://html.spec.whatwg.org/multipage/parsing.html#the-initial-insertion-mode>
+    pub fn set_quirks_mode(&mut self, mode: QuirksMode) {
+        if self.nodes.quirks_locked() {
+            return;
+        }
+        self.nodes.set_quirks_mode(mode);
+        self.stylist.set_quirks_mode(mode);
+    }
+
     pub fn set_style_property(&mut self, node_id: NodeId, name: &str, value: &str) {
+        let quirks = self.quirks_mode();
         let node = &mut self.nodes[node_id];
         let did_change = node.element_data_mut().unwrap().set_style_property(
             name,
             value,
             &self.guard,
             self.url.url_extra_data(),
+            quirks,
         );
         if did_change {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
@@ -802,11 +827,13 @@ impl BaseDocument {
     }
 
     pub fn remove_style_property(&mut self, node_id: NodeId, name: &str) {
+        let quirks = self.quirks_mode();
         let node = &mut self.nodes[node_id];
         let did_change = node.element_data_mut().unwrap().remove_style_property(
             name,
             &self.guard,
             self.url.url_extra_data(),
+            quirks,
         );
         if did_change {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
@@ -1290,7 +1317,7 @@ impl BaseDocument {
                 import_depth: 0,
             }),
             None,
-            QuirksMode::NoQuirks,
+            self.quirks_mode(),
             AllowImportRules::Yes,
         );
 

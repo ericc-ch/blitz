@@ -72,6 +72,7 @@ impl BaseDocument {
             incremental: Some(self.incremental_layout),
             abort_signal: Some(abort_signal),
             subdocument_depth: self.subdocument_depth + 1,
+            quirks_mode: Some(self.quirks_mode()),
         }
     }
 

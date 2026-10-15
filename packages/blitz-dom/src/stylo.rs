@@ -259,7 +259,9 @@ impl<'a> TDocument for BlitzNode<'a> {
     }
 
     fn quirks_mode(&self) -> QuirksMode {
-        QuirksMode::NoQuirks
+        // The tree stores the document mode so every node reports the same
+        // value the stylist was built with.
+        self.tree().quirks_mode()
     }
 
     fn shared_lock(&self) -> &SharedRwLock {
@@ -499,7 +501,9 @@ impl selectors::Element for BlitzNode<'_> {
             NonTSPseudoClass::FocusVisible => false,
             NonTSPseudoClass::Fullscreen => false,
             NonTSPseudoClass::Hover => self.element_state().contains(ElementState::HOVER),
-            NonTSPseudoClass::Indeterminate => false,
+            NonTSPseudoClass::Indeterminate => {
+                self.element_state().contains(ElementState::INDETERMINATE)
+            }
             NonTSPseudoClass::Lang(_) => false,
             NonTSPseudoClass::CustomState(_) => false,
             NonTSPseudoClass::Link => self.element_state().contains(ElementState::UNVISITED),

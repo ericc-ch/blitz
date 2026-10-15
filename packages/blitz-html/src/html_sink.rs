@@ -94,6 +94,22 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             || rest[..tag_end].contains("xmlns='http://www.w3.org/1999/xhtml'")
     }
 
+    fn parser_quirks(mode: blitz_dom::StyleQuirksMode) -> QuirksMode {
+        match mode {
+            blitz_dom::StyleQuirksMode::Quirks => QuirksMode::Quirks,
+            blitz_dom::StyleQuirksMode::LimitedQuirks => QuirksMode::LimitedQuirks,
+            blitz_dom::StyleQuirksMode::NoQuirks => QuirksMode::NoQuirks,
+        }
+    }
+
+    fn style_quirks(mode: QuirksMode) -> blitz_dom::StyleQuirksMode {
+        match mode {
+            QuirksMode::Quirks => blitz_dom::StyleQuirksMode::Quirks,
+            QuirksMode::LimitedQuirks => blitz_dom::StyleQuirksMode::LimitedQuirks,
+            QuirksMode::NoQuirks => blitz_dom::StyleQuirksMode::NoQuirks,
+        }
+    }
+
     pub fn parse_into_mutator<'a, 'd>(mutr: &'a mut DocumentMutator<'d>, html: &str) {
         let is_xhtml_doc = html.starts_with("<?xml")
             || html.starts_with("<!DOCTYPE") && {
@@ -106,17 +122,20 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             Self::parse_xml_into_mutator(mutr, html);
         } else {
             // Parse as HTML
+            let quirks_mode = Self::parser_quirks(mutr.doc.quirks_mode());
             let mut sink = DocumentHtmlParser::new(mutr);
             sink.is_xml = false;
             let opts = ParseOpts {
                 tokenizer: TokenizerOpts::default(),
                 tree_builder: TreeBuilderOpts {
                     exact_errors: false,
-                    scripting_enabled: false, // Enables parsing of <noscript> tags
+                    // Scripting is enabled, so `<noscript>` is text
+                    // (<https://html.spec.whatwg.org/multipage/scripting.html#the-noscript-element>).
+                    scripting_enabled: true,
                     iframe_srcdoc: false,
                     // The doctype is a real document child; the sink keeps it.
                     drop_doctype: false,
-                    quirks_mode: QuirksMode::NoQuirks,
+                    quirks_mode,
                 },
             };
             html5ever::parse_document(sink, opts)
@@ -144,16 +163,19 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         element_id: NodeId,
         html: &str,
     ) {
+        let quirks_mode = Self::parser_quirks(mutr.doc.quirks_mode());
         let sink = DocumentHtmlParser::new(mutr);
 
         let opts = ParseOpts {
             tokenizer: TokenizerOpts::default(),
             tree_builder: TreeBuilderOpts {
                 exact_errors: false,
-                scripting_enabled: false, // Enables parsing of <noscript> tags
+                // Scripting is enabled, so `<noscript>` is text
+                // (<https://html.spec.whatwg.org/multipage/scripting.html#the-noscript-element>).
+                scripting_enabled: true,
                 iframe_srcdoc: false,
                 drop_doctype: true,
-                quirks_mode: QuirksMode::NoQuirks,
+                quirks_mode,
             },
         };
         html5ever::driver::parse_fragment_for_element(sink, opts, element_id, false, None)
@@ -198,9 +220,9 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         let mutr = self.mutr();
         let root = mutr.doc.root_node().id;
         mutr.child_ids(root).iter().any(|child| {
-            mutr.doc.get_node(*child).is_some_and(|node| {
-                matches!(node.data, blitz_dom::NodeData::Doctype { .. })
-            })
+            mutr.doc
+                .get_node(*child)
+                .is_some_and(|node| matches!(node.data, blitz_dom::NodeData::Doctype { .. }))
         })
     }
 }
@@ -376,6 +398,10 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
 
     fn set_quirks_mode(&self, mode: QuirksMode) {
         self.quirks_mode.set(mode);
+        // A caller-supplied mode stays. Otherwise the parser's decision
+        // becomes the stylist's mode
+        // (<https://html.spec.whatwg.org/multipage/parsing.html#the-initial-insertion-mode>).
+        self.mutr().doc.set_quirks_mode(Self::style_quirks(mode));
     }
 
     fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<html5ever::Attribute>) {

@@ -1335,9 +1335,10 @@ impl Node {
     }
 
     pub fn flush_style_attribute(&mut self, url_extra_data: &UrlExtraData) {
+        let quirks = self.tree().quirks_mode();
         if let NodeData::Element(ref mut elem_data) = self.data {
             if let Some(guard) = elem_data.guard.clone() {
-                elem_data.flush_style_attribute(&guard, url_extra_data);
+                elem_data.flush_style_attribute(&guard, url_extra_data, quirks);
             }
         }
     }
