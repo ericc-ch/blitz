@@ -1213,7 +1213,8 @@ impl BaseDocument {
                         };
                         self.net_provider.fetch(
                             self.id(),
-                            self.build_request(resolved_href.clone()),
+                            self.build_request(resolved_href.clone())
+                                .kind(blitz_traits::net::RequestKind::Stylesheet),
                             ResourceHandler::boxed(
                                 self.tx.clone(),
                                 self.id,

@@ -57,7 +57,26 @@ pub struct Request {
     pub headers: HeaderMap,
     pub body: Body,
     pub signal: Option<AbortSignal>,
+    /// What the request fetches. Embedders apply per-destination policy from
+    /// this instead of guessing from the URL
+    /// (<https://fetch.spec.whatwg.org/#concept-request-destination>).
+    pub kind: RequestKind,
 }
+
+/// The resource family a request belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RequestKind {
+    /// A destination the embedder does not need to distinguish.
+    #[default]
+    Other,
+    /// A document stylesheet: `<link rel=stylesheet>` or `@import`.
+    Stylesheet,
+    /// An image resource.
+    Image,
+    /// A web font loaded for CSS `@font-face`.
+    Font,
+}
+
 impl Request {
     /// A get request to the specified Url and an empty body
     pub fn get(url: Url) -> Self {
@@ -68,11 +87,18 @@ impl Request {
             headers: HeaderMap::new(),
             body: Body::Empty,
             signal: None,
+            kind: RequestKind::Other,
         }
     }
 
     pub fn signal(mut self, signal: AbortSignal) -> Self {
         self.signal = Some(signal);
+        self
+    }
+
+    /// Marks what the request fetches.
+    pub fn kind(mut self, kind: RequestKind) -> Self {
+        self.kind = kind;
         self
     }
 }
