@@ -35,6 +35,16 @@ use blitz_traits::node_id::NodeId;
 use crate::BaseDocument;
 use crate::net::StylesheetLoader;
 
+/// One engine stylesheet CSSOM can address, including after it leaves the
+/// document cascade
+/// (<https://drafts.csswg.org/cssom/#remove-a-css-style-sheet>).
+pub(crate) struct CssomSheetRecord {
+    pub sheet: DocumentStyleSheet,
+    pub origin_clean: bool,
+    pub live: bool,
+    pub owner: NodeId,
+}
+
 /// Errors from CSSOM mutation operations, mirroring the `DOMException` names
 /// which the corresponding JavaScript APIs throw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +314,22 @@ impl BaseDocument {
         self.stylesheet_generation
     }
 
+    /// The live CSSOM sheet id for `node_id`, if it currently owns a sheet.
+    pub fn node_cssom_sheet_id(&self, node_id: NodeId) -> Option<u64> {
+        self.node_cssom_sheet.get(&node_id).copied()
+    }
+
+    /// `Some(flag)` when `sheet_id` still names a sheet. `None` when it does not.
+    pub fn cssom_sheet_origin_clean(&self, sheet_id: u64) -> Option<bool> {
+        self.cssom_sheets
+            .get(&sheet_id)
+            .map(|record| record.origin_clean)
+    }
+
+    fn cssom_sheet(&self, sheet_id: u64) -> Option<&DocumentStyleSheet> {
+        self.cssom_sheets.get(&sheet_id).map(|record| &record.sheet)
+    }
+
     /// Whether the stylesheet owned by `node_id` has been disabled through the
     /// CSSOM (`CSSStyleSheet.disabled` / `HTMLStyleElement.disabled` /
     /// `HTMLLinkElement.disabled`). `false` if the node owns no stylesheet.
@@ -396,7 +422,13 @@ impl BaseDocument {
 
     /// The number of rules in the rule list at `path` (`CSSRuleList.length`)
     pub fn stylesheet_rule_count(&self, node_id: NodeId, path: &[usize]) -> Option<usize> {
-        let sheet = self.nodes_to_stylesheet.get(&node_id)?;
+        self.cssom_rule_count(self.node_cssom_sheet.get(&node_id).copied()?, path)
+    }
+
+    /// [`Self::stylesheet_rule_count`] for a CSSOM sheet id, including a sheet
+    /// that has left the document.
+    pub fn cssom_rule_count(&self, sheet_id: u64, path: &[usize]) -> Option<usize> {
+        let sheet = self.cssom_sheet(sheet_id)?;
         let guard = self.guard.read();
         let list = Self::resolve_rule_list(sheet, &guard, path, |_| {})?;
         Some(match list {
@@ -407,7 +439,12 @@ impl BaseDocument {
 
     /// The CSSOM-visible attributes of the rule at `path`
     pub fn stylesheet_rule_info(&self, node_id: NodeId, path: &[usize]) -> Option<CssRuleInfo> {
-        let sheet = self.nodes_to_stylesheet.get(&node_id)?;
+        self.cssom_rule_info(self.node_cssom_sheet.get(&node_id).copied()?, path)
+    }
+
+    /// [`Self::stylesheet_rule_info`] for a CSSOM sheet id.
+    pub fn cssom_rule_info(&self, sheet_id: u64, path: &[usize]) -> Option<CssRuleInfo> {
+        let sheet = self.cssom_sheet(sheet_id)?;
         let guard = self.guard.read();
         let handle = Self::resolve_rule(sheet, &guard, path, |_| {})?;
         let mut css_text = CssStringWriter::new();
@@ -449,11 +486,30 @@ impl BaseDocument {
         rule: &str,
         index: usize,
     ) -> Result<usize, CssomError> {
-        let sheet = self
-            .nodes_to_stylesheet
+        let sheet_id = self
+            .node_cssom_sheet
             .get(&node_id)
-            .ok_or(CssomError::NotFound)?
-            .clone();
+            .copied()
+            .ok_or(CssomError::NotFound)?;
+        self.cssom_insert_rule(sheet_id, path, rule, index)
+    }
+
+    /// [`Self::stylesheet_insert_rule`] for a CSSOM sheet id. A detached sheet
+    /// still accepts the edit and does not notify the document stylist.
+    pub fn cssom_insert_rule(
+        &mut self,
+        sheet_id: u64,
+        path: &[usize],
+        rule: &str,
+        index: usize,
+    ) -> Result<usize, CssomError> {
+        let (sheet, live, owner) = {
+            let record = self
+                .cssom_sheets
+                .get(&sheet_id)
+                .ok_or(CssomError::NotFound)?;
+            (record.sheet.clone(), record.live, record.owner)
+        };
         let loader = self.stylesheet_loader();
         let lock = &self.guard;
 
@@ -512,17 +568,19 @@ impl BaseDocument {
         };
 
         let guard = lock.read();
-        if let CssRule::FontFace(_) = &new_rule {
-            crate::net::fetch_font_face_rules(
-                std::iter::once(&new_rule),
-                self.tx.clone(),
-                self.id(),
-                Some(node_id),
-                &self.net_provider,
-                &self.shell_provider,
-                &guard,
-                self.abort_signal.as_ref(),
-            );
+        if live {
+            if let CssRule::FontFace(_) = &new_rule {
+                crate::net::fetch_font_face_rules(
+                    std::iter::once(&new_rule),
+                    self.tx.clone(),
+                    self.id(),
+                    Some(owner),
+                    &self.net_provider,
+                    &self.shell_provider,
+                    &guard,
+                    self.abort_signal.as_ref(),
+                );
+            }
         }
         let (change_kind, ancestors) = match &list {
             RuleList::Css(_) => (RuleChangeKind::Insertion, ancestors.as_slice()),
@@ -532,9 +590,11 @@ impl BaseDocument {
                 &ancestors[..ancestors.len().saturating_sub(1)],
             ),
         };
-        let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
-        self.stylist
-            .rule_changed(&sheet, &new_rule, &guard, change_kind, &ancestor_refs);
+        if live {
+            let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
+            self.stylist
+                .rule_changed(&sheet, &new_rule, &guard, change_kind, &ancestor_refs);
+        }
         Ok(index)
     }
 
@@ -547,11 +607,28 @@ impl BaseDocument {
         path: &[usize],
         index: usize,
     ) -> Result<(), CssomError> {
-        let sheet = self
-            .nodes_to_stylesheet
+        let sheet_id = self
+            .node_cssom_sheet
             .get(&node_id)
-            .ok_or(CssomError::NotFound)?
-            .clone();
+            .copied()
+            .ok_or(CssomError::NotFound)?;
+        self.cssom_delete_rule(sheet_id, path, index)
+    }
+
+    /// [`Self::stylesheet_delete_rule`] for a CSSOM sheet id.
+    pub fn cssom_delete_rule(
+        &mut self,
+        sheet_id: u64,
+        path: &[usize],
+        index: usize,
+    ) -> Result<(), CssomError> {
+        let (sheet, live) = {
+            let record = self
+                .cssom_sheets
+                .get(&sheet_id)
+                .ok_or(CssomError::NotFound)?;
+            (record.sheet.clone(), record.live)
+        };
         let lock = &self.guard;
 
         let (ancestors, list) = {
@@ -584,20 +661,22 @@ impl BaseDocument {
         };
 
         let guard = lock.read();
-        let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
-        self.stylist
-            .rule_changed(&sheet, &removed_rule, &guard, change_kind, &ancestor_refs);
+        if live {
+            let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
+            self.stylist
+                .rule_changed(&sheet, &removed_rule, &guard, change_kind, &ancestor_refs);
+        }
         Ok(())
     }
 
     /// The declarations of the rule at `path`, for read-only access
     fn rule_declaration_target(
         &self,
-        node_id: NodeId,
+        sheet_id: u64,
         path: &[usize],
         guard: &SharedRwLockReadGuard,
     ) -> Option<DeclarationTarget> {
-        let sheet = self.nodes_to_stylesheet.get(&node_id)?;
+        let sheet = self.cssom_sheet(sheet_id)?;
         let handle = Self::resolve_rule(sheet, guard, path, |_| {})?;
         declaration_target(&handle, guard)
     }
@@ -607,10 +686,18 @@ impl BaseDocument {
     /// report as changed and its ancestors.
     fn rule_declaration_target_mut(
         &self,
-        node_id: NodeId,
+        sheet_id: u64,
         path: &[usize],
-    ) -> Option<(DocumentStyleSheet, Vec<CssRule>, CssRule, DeclarationTarget)> {
-        let sheet = self.nodes_to_stylesheet.get(&node_id)?.clone();
+    ) -> Option<(
+        DocumentStyleSheet,
+        Vec<CssRule>,
+        CssRule,
+        DeclarationTarget,
+        bool,
+    )> {
+        let record = self.cssom_sheets.get(&sheet_id)?;
+        let live = record.live;
+        let sheet = record.sheet.clone();
         let guard = self.guard.read();
         let mut ancestors = Vec::with_capacity(path.len());
         let handle = Self::resolve_rule(&sheet, &guard, path, |rule| ancestors.push(rule.clone()))?;
@@ -625,7 +712,7 @@ impl BaseDocument {
                 (rule, ancestors)
             }
         };
-        Some((sheet, ancestors, changed_rule, target))
+        Some((sheet, ancestors, changed_rule, target, live))
     }
 
     /// The serialized declarations of the rule at `path` (`CSSRule.style.cssText`)
@@ -634,8 +721,12 @@ impl BaseDocument {
         node_id: NodeId,
         path: &[usize],
     ) -> Option<String> {
+        self.cssom_rule_style_css_text(self.node_cssom_sheet.get(&node_id).copied()?, path)
+    }
+
+    pub fn cssom_rule_style_css_text(&self, sheet_id: u64, path: &[usize]) -> Option<String> {
         let guard = self.guard.read();
-        let target = self.rule_declaration_target(node_id, path, &guard)?;
+        let target = self.rule_declaration_target(sheet_id, path, &guard)?;
         let mut css = CssStringWriter::new();
         match target {
             DeclarationTarget::Block { block, .. } => {
@@ -661,8 +752,16 @@ impl BaseDocument {
         node_id: NodeId,
         path: &[usize],
     ) -> Option<Vec<String>> {
+        self.cssom_rule_style_property_names(self.node_cssom_sheet.get(&node_id).copied()?, path)
+    }
+
+    pub fn cssom_rule_style_property_names(
+        &self,
+        sheet_id: u64,
+        path: &[usize],
+    ) -> Option<Vec<String>> {
         let guard = self.guard.read();
-        let target = self.rule_declaration_target(node_id, path, &guard)?;
+        let target = self.rule_declaration_target(sheet_id, path, &guard)?;
         Some(match target {
             DeclarationTarget::Block { block, .. } => block
                 .read_with(&guard)
@@ -690,8 +789,21 @@ impl BaseDocument {
         path: &[usize],
         property: &str,
     ) -> Option<(String, bool)> {
+        self.cssom_rule_style_get_property(
+            self.node_cssom_sheet.get(&node_id).copied()?,
+            path,
+            property,
+        )
+    }
+
+    pub fn cssom_rule_style_get_property(
+        &self,
+        sheet_id: u64,
+        path: &[usize],
+        property: &str,
+    ) -> Option<(String, bool)> {
         let guard = self.guard.read();
-        let target = self.rule_declaration_target(node_id, path, &guard)?;
+        let target = self.rule_declaration_target(sheet_id, path, &guard)?;
         let mut css = CssStringWriter::new();
         let important = match target {
             DeclarationTarget::Block { block, .. } => {
@@ -724,12 +836,28 @@ impl BaseDocument {
         value: &str,
         important: bool,
     ) -> Result<(), CssomError> {
+        let sheet_id = self
+            .node_cssom_sheet
+            .get(&node_id)
+            .copied()
+            .ok_or(CssomError::NotFound)?;
+        self.cssom_rule_style_set_property(sheet_id, path, property, value, important)
+    }
+
+    pub fn cssom_rule_style_set_property(
+        &mut self,
+        sheet_id: u64,
+        path: &[usize],
+        property: &str,
+        value: &str,
+        important: bool,
+    ) -> Result<(), CssomError> {
         if value.trim().is_empty() {
-            self.stylesheet_rule_style_remove_property(node_id, path, property)?;
+            self.cssom_rule_style_remove_property(sheet_id, path, property)?;
             return Ok(());
         }
-        let (sheet, ancestors, rule, target) = self
-            .rule_declaration_target_mut(node_id, path)
+        let (sheet, ancestors, rule, target, live) = self
+            .rule_declaration_target_mut(sheet_id, path)
             .ok_or(CssomError::NotFound)?;
         let url_data = self.url.url_extra_data();
         let lock = &self.guard;
@@ -795,9 +923,11 @@ impl BaseDocument {
         };
 
         let guard = lock.read();
-        let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
-        self.stylist
-            .rule_changed(&sheet, &rule, &guard, change_kind, &ancestor_refs);
+        if live {
+            let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
+            self.stylist
+                .rule_changed(&sheet, &rule, &guard, change_kind, &ancestor_refs);
+        }
         Ok(())
     }
 
@@ -810,8 +940,22 @@ impl BaseDocument {
         path: &[usize],
         property: &str,
     ) -> Result<String, CssomError> {
-        let (sheet, ancestors, rule, target) = self
-            .rule_declaration_target_mut(node_id, path)
+        let sheet_id = self
+            .node_cssom_sheet
+            .get(&node_id)
+            .copied()
+            .ok_or(CssomError::NotFound)?;
+        self.cssom_rule_style_remove_property(sheet_id, path, property)
+    }
+
+    pub fn cssom_rule_style_remove_property(
+        &mut self,
+        sheet_id: u64,
+        path: &[usize],
+        property: &str,
+    ) -> Result<String, CssomError> {
+        let (sheet, ancestors, rule, target, live) = self
+            .rule_declaration_target_mut(sheet_id, path)
             .ok_or(CssomError::NotFound)?;
         let lock = &self.guard;
         let mut removed_value = CssStringWriter::new();
@@ -849,9 +993,11 @@ impl BaseDocument {
         };
 
         let guard = lock.read();
-        let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
-        self.stylist
-            .rule_changed(&sheet, &rule, &guard, change_kind, &ancestor_refs);
+        if live {
+            let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
+            self.stylist
+                .rule_changed(&sheet, &rule, &guard, change_kind, &ancestor_refs);
+        }
         Ok(removed_value)
     }
 
@@ -864,11 +1010,15 @@ impl BaseDocument {
         path: &[usize],
         selectors: &str,
     ) -> Result<(), CssomError> {
-        let sheet = self
-            .nodes_to_stylesheet
+        let id = self
+            .node_cssom_sheet
             .get(&node_id)
-            .ok_or(CssomError::NotFound)?
-            .clone();
+            .copied()
+            .ok_or(CssomError::NotFound)?;
+        let (sheet, live) = {
+            let record = self.cssom_sheets.get(&id).ok_or(CssomError::NotFound)?;
+            (record.sheet.clone(), record.live)
+        };
         let lock = &self.guard;
 
         let (ancestors, style_rule) = {
@@ -920,15 +1070,17 @@ impl BaseDocument {
         }
 
         let guard = lock.read();
-        let rule = CssRule::Style(style_rule);
-        let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
-        self.stylist.rule_changed(
-            &sheet,
-            &rule,
-            &guard,
-            RuleChangeKind::Generic,
-            &ancestor_refs,
-        );
+        if live {
+            let rule = CssRule::Style(style_rule);
+            let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
+            self.stylist.rule_changed(
+                &sheet,
+                &rule,
+                &guard,
+                RuleChangeKind::Generic,
+                &ancestor_refs,
+            );
+        }
         Ok(())
     }
 
@@ -940,8 +1092,13 @@ impl BaseDocument {
         path: &[usize],
         css: &str,
     ) -> Result<(), CssomError> {
-        let (sheet, ancestors, rule, target) = self
-            .rule_declaration_target_mut(node_id, path)
+        let sheet_id = self
+            .node_cssom_sheet
+            .get(&node_id)
+            .copied()
+            .ok_or(CssomError::NotFound)?;
+        let (sheet, ancestors, rule, target, live) = self
+            .rule_declaration_target_mut(sheet_id, path)
             .ok_or(CssomError::NotFound)?;
         let DeclarationTarget::Block { block, rule_type } = target else {
             return Err(CssomError::NotSupported);
@@ -959,13 +1116,15 @@ impl BaseDocument {
             *block.write_with(&mut guard) = new_block;
         }
         let guard = lock.read();
-        let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
-        let change_kind = match rule_type {
-            CssRuleType::PositionTry => RuleChangeKind::PositionTryDeclarations,
-            _ => RuleChangeKind::StyleRuleDeclarations,
-        };
-        self.stylist
-            .rule_changed(&sheet, &rule, &guard, change_kind, &ancestor_refs);
+        if live {
+            let ancestor_refs: Vec<CssRuleRef> = ancestors.iter().map(CssRuleRef::from).collect();
+            let change_kind = match rule_type {
+                CssRuleType::PositionTry => RuleChangeKind::PositionTryDeclarations,
+                _ => RuleChangeKind::StyleRuleDeclarations,
+            };
+            self.stylist
+                .rule_changed(&sheet, &rule, &guard, change_kind, &ancestor_refs);
+        }
         Ok(())
     }
 }

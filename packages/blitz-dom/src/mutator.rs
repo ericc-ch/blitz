@@ -1217,8 +1217,13 @@ impl<'doc> DocumentMutator<'doc> {
         self.doc
             .stylist
             .force_stylesheet_origins_dirty(OriginSet::all());
+        drop(guard);
 
         self.doc.nodes_to_stylesheet.remove(&node_id);
+        // The CSSOM sheet object outlives the owner. It stays readable and
+        // editable; it just leaves the document cascade
+        // (<https://drafts.csswg.org/cssom/#remove-a-css-style-sheet>).
+        self.doc.detach_cssom_sheet(node_id);
         self.doc.stylesheet_generation += 1;
     }
 

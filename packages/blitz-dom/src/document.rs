@@ -339,6 +339,13 @@ pub struct BaseDocument {
     /// added, replaced or removed), so that CSSOM wrappers can detect that
     /// their cached rule data is stale.
     pub(crate) stylesheet_generation: u64,
+    /// Stylesheet objects CSSOM can still address after the owner node drops
+    /// or replaces them. The id is stable for one engine sheet
+    /// (<https://drafts.csswg.org/cssom/#concept-css-style-sheet>).
+    pub(crate) cssom_sheets: HashMap<u64, crate::cssom::CssomSheetRecord>,
+    /// The live CSSOM sheet id for an owner node, if it has one.
+    pub(crate) node_cssom_sheet: HashMap<NodeId, u64>,
+    pub(crate) next_cssom_sheet: u64,
     /// Map from form control node ID's to their associated forms node ID's
     pub(crate) controls_to_form: HashMap<NodeId, NodeId>,
     /// Nodes that contain sub documents
@@ -398,6 +405,24 @@ pub struct BaseDocument {
     /// it cancels all in-flight fetches tied to this document. Set via
     /// [`DocumentConfig::abort_signal`].
     pub(crate) abort_signal: Option<AbortSignal>,
+}
+
+/// Whether a fetched stylesheet response is origin-clean.
+///
+/// Same tuple origin as the document is clean. A cross-origin response is
+/// not, because this fetch path does not record a CORS approval
+/// (<https://drafts.csswg.org/cssom/#concept-css-style-sheet-origin-clean-flag>).
+fn stylesheet_response_origin_clean(document: &url::Url, resolved: &str) -> bool {
+    let Ok(resolved) = url::Url::parse(resolved) else {
+        return false;
+    };
+    let document_origin = document.origin();
+    let response_origin = resolved.origin();
+    match (document_origin, response_origin) {
+        (url::Origin::Tuple(..), url::Origin::Tuple(..)) => document.origin() == resolved.origin(),
+        (url::Origin::Opaque(_), url::Origin::Opaque(_)) => document.scheme() == resolved.scheme(),
+        _ => false,
+    }
 }
 
 impl BaseDocument {
@@ -497,6 +522,9 @@ impl BaseDocument {
             url: base_url,
             nodes_to_stylesheet: BTreeMap::new(),
             stylesheet_generation: 0,
+            cssom_sheets: HashMap::new(),
+            node_cssom_sheet: HashMap::new(),
+            next_cssom_sheet: 1,
             font_ctx,
             #[cfg(feature = "parallel-construct")]
             thread_font_contexts: ThreadLocal::new(),
@@ -1281,7 +1309,60 @@ impl BaseDocument {
         self.add_stylesheet_for_node(sheet, node_id);
     }
 
+    /// Keeps a CSSOM handle for `stylesheet` and makes it the owner's live sheet.
+    /// The previous handle stays in `cssom_sheets` so an already-returned
+    /// `CSSStyleSheet` still addresses the old rules
+    /// (<https://drafts.csswg.org/cssom/#concept-css-style-sheet>).
+    pub(crate) fn retain_cssom_sheet(
+        &mut self,
+        stylesheet: DocumentStyleSheet,
+        node_id: NodeId,
+        origin_clean: bool,
+    ) -> u64 {
+        let id = self.next_cssom_sheet;
+        self.next_cssom_sheet = self.next_cssom_sheet.saturating_add(1);
+        if let Some(previous) = self.node_cssom_sheet.insert(node_id, id) {
+            if let Some(old) = self.cssom_sheets.get_mut(&previous) {
+                old.live = false;
+            }
+        }
+        self.cssom_sheets.insert(
+            id,
+            crate::cssom::CssomSheetRecord {
+                sheet: stylesheet,
+                origin_clean,
+                live: true,
+                owner: node_id,
+            },
+        );
+        id
+    }
+
+    /// Sets the origin-clean flag of the owner's live sheet.
+    pub fn set_cssom_origin_clean(&mut self, node_id: NodeId, origin_clean: bool) {
+        let Some(id) = self.node_cssom_sheet.get(&node_id).copied() else {
+            return;
+        };
+        if let Some(record) = self.cssom_sheets.get_mut(&id) {
+            record.origin_clean = origin_clean;
+        }
+    }
+
+    /// Drops the live association but keeps the sheet object for CSSOM.
+    pub(crate) fn detach_cssom_sheet(&mut self, node_id: NodeId) {
+        let Some(id) = self.node_cssom_sheet.remove(&node_id) else {
+            return;
+        };
+        if let Some(record) = self.cssom_sheets.get_mut(&id) {
+            record.live = false;
+        }
+    }
+
     pub fn add_stylesheet_for_node(&mut self, stylesheet: DocumentStyleSheet, node_id: NodeId) {
+        // Inline sheets are same-document. A fetched `<link>` sheet overwrites
+        // this with the response URL's origin-clean flag before script runs
+        // (<https://drafts.csswg.org/cssom/#concept-css-style-sheet-origin-clean-flag>).
+        self.retain_cssom_sheet(stylesheet.clone(), node_id, true);
         let old = self.nodes_to_stylesheet.insert(node_id, stylesheet.clone());
         self.stylesheet_generation += 1;
 
@@ -1393,6 +1474,11 @@ impl BaseDocument {
             Resource::Css(css) => {
                 let node_id = res.node_id.unwrap();
                 self.add_stylesheet_for_node(css, node_id);
+                let clean = res
+                    .resolved_url
+                    .as_deref()
+                    .is_some_and(|resolved| stylesheet_response_origin_clean(&self.url, resolved));
+                self.set_cssom_origin_clean(node_id, clean);
             }
             Resource::ImportedCss(import_rule, sheet) => {
                 let mut guard = self.guard.write();
