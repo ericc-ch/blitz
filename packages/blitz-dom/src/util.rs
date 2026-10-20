@@ -241,6 +241,14 @@ mod svg_tests {
     }
 
     #[test]
+    fn zero_width_is_a_valid_image() {
+        let src = br#"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="100"><rect width="100" height="100" fill="red"/></svg>"#;
+        let svg = parse_svg_image(src).unwrap();
+        assert_eq!(svg.intrinsic_width(), Some(0.0));
+        assert_eq!(svg.intrinsic_height(), Some(100.0));
+    }
+
+    #[test]
     fn non_numeric_dimensions_are_not_intrinsic() {
         let src = br#"<svg xmlns="http://www.w3.org/2000/svg" width="auto" height="foo" viewBox="0 0 200 100"></svg>"#;
         let svg = parse_svg_image(src).unwrap();

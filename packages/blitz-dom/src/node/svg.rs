@@ -64,6 +64,16 @@ impl SvgIntrinsicDimensions {
             degenerate_view_box,
         }
     }
+
+    /// Whether an absolute `width` or `height` is zero. Percentage lengths stay
+    /// unresolved, so they are not zero-sized here.
+    pub fn is_zero_sized(&self) -> bool {
+        use svgtypes::LengthUnit;
+        let zero = |length: Option<svgtypes::Length>| {
+            length.is_some_and(|length| length.unit != LengthUnit::Percent && length.number == 0.0)
+        };
+        zero(self.width) || zero(self.height)
+    }
 }
 
 /// A parsed SVG image.
@@ -106,10 +116,22 @@ impl SvgImageData {
         };
         let doc = roxmltree::Document::parse_with_options(text, xml_options)
             .map_err(usvg::Error::ParsingFailed)?;
-        let tree = usvg::Tree::from_xmltree(&doc, options)?;
+        let intrinsic_dimensions = SvgIntrinsicDimensions::from_xmltree(&doc);
+        let tree = match usvg::Tree::from_xmltree(&doc, options) {
+            Ok(tree) => tree,
+            // usvg rejects a zero width or height, but an SVG image with a
+            // zero dimension is valid and paints nothing. Keep a placeholder
+            // tree so callers can still read the declared intrinsic size
+            // (<https://svgwg.org/svg2-draft/coords.html#IntrinsicSizing>).
+            Err(_) if intrinsic_dimensions.is_zero_sized() => usvg::Tree::from_str(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>",
+                options,
+            )?,
+            Err(error) => return Err(error),
+        };
         Ok(Self {
             tree: Arc::new(tree),
-            intrinsic_dimensions: SvgIntrinsicDimensions::from_xmltree(&doc),
+            intrinsic_dimensions,
         })
     }
 
@@ -117,22 +139,26 @@ impl SvgImageData {
     /// declared an absolute (non-percentage) `width`.
     pub fn intrinsic_width(&self) -> Option<f32> {
         use svgtypes::LengthUnit;
-        let declared = self
-            .intrinsic_dimensions
+        self.intrinsic_dimensions
             .width
-            .is_some_and(|len| len.unit != LengthUnit::Percent);
-        declared.then(|| self.tree.size().width())
+            .filter(|len| len.unit != LengthUnit::Percent)
+            .map(|len| match len.unit {
+                LengthUnit::None | LengthUnit::Px => len.number as f32,
+                _ => self.tree.size().width(),
+            })
     }
 
     /// The intrinsic height in CSS px, present only when the root `<svg>`
     /// declared an absolute (non-percentage) `height`.
     pub fn intrinsic_height(&self) -> Option<f32> {
         use svgtypes::LengthUnit;
-        let declared = self
-            .intrinsic_dimensions
+        self.intrinsic_dimensions
             .height
-            .is_some_and(|len| len.unit != LengthUnit::Percent);
-        declared.then(|| self.tree.size().height())
+            .filter(|len| len.unit != LengthUnit::Percent)
+            .map(|len| match len.unit {
+                LengthUnit::None | LengthUnit::Px => len.number as f32,
+                _ => self.tree.size().height(),
+            })
     }
 
     /// The aspect ratio of the root `<svg>`'s `viewBox`, if it declares one.
