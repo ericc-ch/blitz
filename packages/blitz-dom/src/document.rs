@@ -426,6 +426,14 @@ fn stylesheet_response_origin_clean(document: &url::Url, resolved: &str) -> bool
 }
 
 impl BaseDocument {
+    /// The document's Parley font context, including fonts registered by
+    /// `@font-face` rules. Canvas text must shape with the same database as
+    /// page text so a canvas `font-family` sees the same faces.
+    pub fn font_context(&self) -> Arc<Mutex<parley::FontContext>> {
+        self.font_ctx.clone()
+    }
+
+
     /// Create a new (empty) [`BaseDocument`] with the specified configuration
     pub fn new(config: DocumentConfig) -> Self {
         static ID_GENERATOR: AtomicUsize = AtomicUsize::new(1);
