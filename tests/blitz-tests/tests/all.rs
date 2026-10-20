@@ -1,7 +1,9 @@
 //! All integration tests are compiled into this single test binary because linking
 //! one binary per file dominates build time. New test files must be added here.
 
+mod accessibility_description;
 mod accessibility_hidden;
+mod accessibility_label;
 mod accessibility_roles;
 mod animations;
 mod anonymous_block_cache_invalidation;
@@ -21,6 +23,8 @@ mod device_coalescing;
 mod dir_attribute;
 mod display_contents;
 mod flex_grid_order;
+mod focus_redraw;
+mod focus_within;
 mod focusability_updates;
 mod fragment_navigation;
 mod harness_smoke;
