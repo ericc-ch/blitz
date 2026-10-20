@@ -51,6 +51,22 @@ const DEFAULT_OBJECT_SIZE: taffy::Size<f32> = taffy::Size {
 /// a canvas has an intrinsic size and aspect ratio given by its width/height
 /// attributes (defaulting to 300x150); other replaced elements (video, iframe,
 /// embed) have no intrinsic dimensions and the 300x150 default object size.
+/// A canvas `width`/`height` attribute is a non-negative integer, not a CSS
+/// length: parsing stops at the first non-digit, so `100%` and `100e1` are
+/// 100, `0x100` is 0, and a value with no leading digit is invalid
+/// (<https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#rules-for-parsing-non-negative-integers>).
+fn canvas_attribute_size(value: &str) -> Option<f32> {
+    let value = value.trim_start();
+    let digits: String = value
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u32>().ok().map(|value| value as f32)
+}
+
 fn tag_intrinsic_sizes(
     tag_name: &LocalName,
     attr_size: taffy::Size<Option<f32>>,
@@ -384,10 +400,10 @@ impl LayoutPassState<'_> {
                     let attr_size = taffy::Size {
                         width: element_data
                             .attr(local_name!("width"))
-                            .and_then(|val| val.parse::<f32>().ok()),
+                            .and_then(canvas_attribute_size),
                         height: element_data
                             .attr(local_name!("height"))
-                            .and_then(|val| val.parse::<f32>().ok()),
+                            .and_then(canvas_attribute_size),
                     };
 
                     // Get the element's intrinsic dimensions and default object size
