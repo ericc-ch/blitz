@@ -57,6 +57,7 @@ const DEFAULT_OBJECT_SIZE: taffy::Size<f32> = taffy::Size {
 /// (<https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#rules-for-parsing-non-negative-integers>).
 fn canvas_attribute_size(value: &str) -> Option<f32> {
     let value = value.trim_start();
+    let value = value.strip_prefix('+').unwrap_or(value);
     let digits: String = value
         .chars()
         .take_while(char::is_ascii_digit)
