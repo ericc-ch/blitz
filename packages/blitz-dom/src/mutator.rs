@@ -474,6 +474,14 @@ impl DocumentMutator<'_> {
             return;
         }
 
+        // An `<img>` loads from its `src` even while detached: `new Image()`
+        // never enters a document. This must run before the detached
+        // early-return below.
+        if (tag, attr) == tag_and_attr!("img", "src") {
+            self.load_image(node_id);
+            return;
+        }
+
         // If node if not in the document, then don't apply any special behaviours
         // and simply set the attribute value
         if !node.flags.is_in_document() {
@@ -495,8 +503,6 @@ impl DocumentMutator<'_> {
             if !element.form_state.dirty_selectedness {
                 element.element_state.insert(ElementState::CHECKED);
             }
-        } else if (tag, attr) == tag_and_attr!("img", "src") {
-            self.load_image(node_id);
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.load_custom_paint_src(node_id);
         } else if (tag, attr) == tag_and_attr!("link", "href")
