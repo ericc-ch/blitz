@@ -26,6 +26,13 @@ use style::bloom::each_relevant_element_hash;
 use style::color::AbsoluteColor;
 use style::data::{ElementDataMut, ElementDataRef};
 use style::global_style_data::STYLE_THREAD_POOL;
+
+/// Serialises `Parallel` style traversals across documents. Stylo's per-worker
+/// caches (`StyleSharingCache`, `StyleBloom`) live in native thread-locals that
+/// a traversal borrows mutably for its whole duration, so two traversals in
+/// flight on the shared pool at once panic with `already mutably borrowed`
+/// (<https://github.com/DioxusLabs/blitz/issues/430>).
+static PARALLEL_TRAVERSAL_LOCK: Mutex<()> = Mutex::new(());
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::properties::ComputedValues;
 use style::properties::{Importance, PropertyDeclaration};
@@ -147,8 +154,13 @@ impl crate::document::BaseDocument {
             // Style the elements, resolving their data
             let mut traverser = RecalcStyle::new(context);
             // `Sequential` bypasses Stylo's global pool. See `StyleThreading`.
-            let pool_guard = matches!(self.style_threading, StyleThreading::Parallel)
-                .then(|| STYLE_THREAD_POOL.pool());
+            let parallel = matches!(self.style_threading, StyleThreading::Parallel);
+            let _traversal_lock = parallel.then(|| {
+                PARALLEL_TRAVERSAL_LOCK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            });
+            let pool_guard = parallel.then(|| STYLE_THREAD_POOL.pool());
             let rayon_pool = pool_guard.as_ref().and_then(|g| g.as_ref());
             style::driver::traverse_dom(&traverser, token, rayon_pool);
             nodes_needing_style_image_flush =
@@ -175,7 +187,25 @@ impl crate::document::BaseDocument {
                 transition.is_new = false;
             }
         }
-        sets.retain(|_, state| !state.is_empty());
+        let mut finished = Vec::new();
+        sets.retain(|key, state| {
+            let keep = !state.is_empty();
+            if !keep {
+                finished.push(key.node);
+            }
+            keep
+        });
+        // Clear `may_have_animations` on elements whose last set (including
+        // their pseudo-elements' sets) was just removed.
+        for node in finished {
+            if sets.keys().any(|key| key.node == node) {
+                continue;
+            }
+            let node_id = NodeId::from_u64(node.id() as u64);
+            if let Some(data) = self.nodes.get(node_id).and_then(|node| node.element_data()) {
+                data.may_have_animations.store(false, Ordering::Relaxed);
+            }
+        }
         self.has_active_animations = sets.values().any(|state| state.needs_animation_ticks());
 
         // Maybe run garbage collection. Stylo has internal to determine whether to run or not.
@@ -377,7 +407,7 @@ impl selectors::Element for BlitzNode<'_> {
         // Shadow DOM functionality in Stylo.
         let non_null =
             NonNull::new((self.id.as_u64() as usize).wrapping_add(1) as *mut ()).unwrap();
-        OpaqueElement::from_non_null_ptr(non_null)
+        OpaqueElement::from_ptr(non_null)
     }
 
     fn parent_element(&self) -> Option<Self> {
@@ -576,18 +606,11 @@ impl selectors::Element for BlitzNode<'_> {
         search_name: &<Self::Impl as selectors::SelectorImpl>::Identifier,
         case_sensitivity: selectors::attr::CaseSensitivity,
     ) -> bool {
-        let class_attr = self.data.attr(local_name!("class"));
-        if let Some(class_attr) = class_attr {
-            // split the class attribute
-            for pheme in class_attr.split_ascii_whitespace() {
-                let atom = Atom::from(pheme);
-                if case_sensitivity.eq_atom(&atom, search_name) {
-                    return true;
-                }
-            }
-        }
-
-        false
+        self.element_data().is_some_and(|data| {
+            data.classes
+                .iter()
+                .any(|class| case_sensitivity.eq_atom(class, search_name))
+        })
     }
 
     fn imported_part(
@@ -694,12 +717,9 @@ impl<'a> TElement for BlitzNode<'a> {
     where
         F: FnMut(&style::values::AtomIdent),
     {
-        let class_attr = self.data.attr(local_name!("class"));
-        if let Some(class_attr) = class_attr {
-            // split the class attribute
-            for pheme in class_attr.split_ascii_whitespace() {
-                let atom = Atom::from(pheme); // interns the string
-                callback(AtomIdent::cast(&atom));
+        if let Some(data) = self.element_data() {
+            for class in &data.classes {
+                callback(AtomIdent::cast(class));
             }
         }
     }
@@ -710,7 +730,7 @@ impl<'a> TElement for BlitzNode<'a> {
     {
         if let Some(attrs) = self.data.attrs() {
             for attr in attrs.iter() {
-                callback(&GenericAtomIdent(attr.name.local.clone()));
+                callback(GenericAtomIdent::cast(&attr.name.local));
             }
         }
     }
@@ -780,11 +800,24 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn may_have_animations(&self) -> bool {
-        true
+        self.element_data()
+            .is_some_and(|data| data.may_have_animations.load(Ordering::Relaxed))
+    }
+
+    fn set_may_have_animations(&self) {
+        if let Some(data) = self.element_data() {
+            data.may_have_animations.store(true, Ordering::Relaxed);
+        }
     }
 
     fn has_animations(&self, context: &SharedStyleContext) -> bool {
-        self.has_css_animations(context, None) || self.has_css_transitions(context, None)
+        if !self.may_have_animations() {
+            return false;
+        }
+        let key = AnimationSetKey::new_for_non_pseudo(TNode::opaque(&TElement::as_node(self)));
+        context
+            .animations
+            .has_active_animations_or_transitions(&key)
     }
 
     fn has_css_animations(
@@ -792,6 +825,9 @@ impl<'a> TElement for BlitzNode<'a> {
         context: &SharedStyleContext,
         pseudo_element: Option<PseudoElement>,
     ) -> bool {
+        if !self.may_have_animations() {
+            return false;
+        }
         let key = AnimationSetKey::new(TNode::opaque(&TElement::as_node(self)), pseudo_element);
         context.animations.has_active_animations(&key)
     }
@@ -801,6 +837,9 @@ impl<'a> TElement for BlitzNode<'a> {
         context: &SharedStyleContext,
         pseudo_element: Option<PseudoElement>,
     ) -> bool {
+        if !self.may_have_animations() {
+            return false;
+        }
         let key = AnimationSetKey::new(TNode::opaque(&TElement::as_node(self)), pseudo_element);
         context.animations.has_active_transitions(&key)
     }
@@ -1342,6 +1381,9 @@ impl<'dom> DomTraversal<BlitzNode<'dom>> for RecalcStyle<'_> {
             recalc_style_at(self, context, el, &mut data, note_child);
 
             sync_pseudo_element_styles(el, &data, &self.nodes_needing_style_image_flush);
+            if let Some(style) = data.styles.get_primary() {
+                el.record_out_of_flow(style);
+            }
 
             if !data.damage.is_empty() {
                 // Mark the ancestor chain so that the damage propagation pass
@@ -1456,6 +1498,7 @@ fn sync_pseudo_element_styles(
                     .push(pe_node_id);
             }
         }
+        pe_node.record_out_of_flow(&pe_style);
         pe_data.styles.primary = Some(pe_style);
         pe_data.set_restyled();
     }

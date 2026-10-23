@@ -42,12 +42,22 @@ macro_rules! local_names {
     };
 }
 
+pub(crate) fn parse_classes(value: &str) -> ThinVec<Atom> {
+    value.split_ascii_whitespace().map(Atom::from).collect()
+}
+
 pub struct ElementData {
     /// The elements tag name, namespace and prefix
     pub name: QualName,
 
     /// The elements id attribute parsed as an atom (if it has one)
     pub id: Option<Atom>,
+
+    /// The elements class attribute split into atoms (empty if it has none).
+    /// Kept in sync with `attrs` by `ElementData::new` and the mutator's
+    /// `set_attribute`/`remove_attribute`, so selector matching can compare
+    /// atoms instead of re-splitting and re-interning the attribute string.
+    pub classes: ThinVec<Atom>,
 
     /// The element's attributes
     pub attrs: Attributes,
@@ -100,6 +110,10 @@ pub struct ElementData {
     /// Whether this node or any of its descendants may carry `RestyleDamage`.
     /// Used by the damage propagation pass to skip unchanged subtrees.
     pub damaged_descendants: AtomicBool,
+    /// Whether an animation or transition set has ever been stored for this
+    /// element (or its pseudo-elements). Lets Stylo skip the animation lookups
+    /// for elements that have never animated.
+    pub may_have_animations: AtomicBool,
 
     // Pseudo element nodes
     pub before: Option<NodeId>,
@@ -300,6 +314,7 @@ impl Clone for ElementData {
         Self {
             name: self.name.clone(),
             id: self.id.clone(),
+            classes: self.classes.clone(),
             attrs: self.attrs.clone(),
             is_focussable: self.is_focussable,
             style_attribute: self.style_attribute.clone(),
@@ -319,6 +334,7 @@ impl Clone for ElementData {
             snapshot_handled: AtomicBool::new(false),
             dirty_descendants: AtomicBool::new(true),
             damaged_descendants: AtomicBool::new(true),
+            may_have_animations: AtomicBool::new(false),
             before: None,
             after: None,
             detailed_layout_info: taffy::DetailedLayoutInfo::None,
@@ -404,10 +420,16 @@ impl ElementData {
             .find(|attr| &attr.name.local == "id")
             .map(|attr| attr.value.as_ref())
             .map(|value: &str| Atom::from(value));
+        let classes = attrs
+            .iter()
+            .find(|attr| &attr.name.local == "class")
+            .map(|attr| parse_classes(&attr.value))
+            .unwrap_or_default();
 
         let mut data = ElementData {
             name,
             id: id_attr_atom,
+            classes,
             attrs: Attributes::new(attrs),
             is_focussable: false,
             style_attribute: Default::default(),
@@ -426,6 +448,7 @@ impl ElementData {
             snapshot_handled: AtomicBool::new(false),
             dirty_descendants: AtomicBool::new(true),
             damaged_descendants: AtomicBool::new(true),
+            may_have_animations: AtomicBool::new(false),
             before: None,
             after: None,
             detailed_layout_info: taffy::DetailedLayoutInfo::None,
@@ -684,7 +707,7 @@ impl ElementData {
         guard: &SharedRwLock,
         url_extra_data: UrlExtraData,
     ) -> bool {
-        let context = ParserContext::new(
+        let mut context = ParserContext::new(
             Origin::Author,
             &url_extra_data,
             Some(CssRuleType::Style),
@@ -706,7 +729,7 @@ impl ElementData {
         let Ok(_) = PropertyDeclaration::parse_into(
             &mut source_property_declaration,
             property_id,
-            &context,
+            &mut context,
             &mut parser,
         ) else {
             #[cfg(feature = "tracing")]

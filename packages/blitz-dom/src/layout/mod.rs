@@ -13,6 +13,7 @@ use std::sync::Arc;
 use style::Atom;
 use style::values::computed::CSSPixelLength;
 use style::values::computed::length_percentage::CalcLengthPercentage;
+use stylo_taffy::CopyStyleGetters;
 use stylo_taffy::TaffyStyloStyle;
 use taffy::{
     AxisStaticEdge, AxisStaticPosition, BlockContext, CoreStyle as _, DetailedLayoutInfo,
@@ -228,7 +229,7 @@ impl LayoutPassState<'_> {
         let font_styles = node.primary_styles().map(|style| {
             use style::values::computed::font::LineHeight;
 
-            let font_size = style.clone_font_size().used_size().px();
+            let font_size = style.slow_clone_font_size().used_size().px();
             let line_height = match style.clone_line_height() {
                 LineHeight::Normal => font_size * 1.2,
                 LineHeight::Number(num) => font_size * num.0,
@@ -853,7 +854,9 @@ impl RoundTree for LayoutPassState<'_> {
     }
 
     fn is_out_of_flow(&self, node_id: NodeId) -> bool {
-        self.node_from_id(node_id).is_out_of_flow()
+        self.node_from_id(node_id)
+            .out_of_flow
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     fn hoisted_child_count(&self, node_id: NodeId) -> usize {
