@@ -35,6 +35,7 @@ use style::values::generics::transform::{Scale, Translate};
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
 use style_dom::ElementState;
 use style_traits::values::ToCss;
+use stylo_taffy::CopyStyleGetters;
 use taffy::{Cache, prelude::Layout};
 use thin_vec::ThinVec;
 
@@ -122,6 +123,10 @@ pub struct Node {
 
     // Flags
     pub flags: NodeFlags,
+    /// Whether the node's box is out of flow (absolutely positioned and not `display: none`).
+    /// Written by the style traversal from the node's new primary style, so that layout
+    /// passes can test it without reading styles.
+    pub out_of_flow: AtomicBool,
 
     /// Node type (Element, TextNode, etc) specific data.
     ///
@@ -418,6 +423,7 @@ impl Node {
             sc_contribution_cache: RefCell::new(ThinVec::new()),
 
             flags: NodeFlags::empty(),
+            out_of_flow: AtomicBool::new(false),
             data,
         }
     }
@@ -544,7 +550,11 @@ impl Node {
             .and_then(|parent_id| self.with(parent_id).primary_styles())
             .map(|style| style.clone_white_space_collapse());
         match white_space_collapse {
-            Some(WhiteSpaceCollapse::Preserve | WhiteSpaceCollapse::BreakSpaces) => false,
+            Some(
+                WhiteSpaceCollapse::Preserve
+                | WhiteSpaceCollapse::BreakSpaces
+                | WhiteSpaceCollapse::PreserveSpaces,
+            ) => false,
             Some(WhiteSpaceCollapse::PreserveBreaks) => !data.content.contains('\n'),
             Some(WhiteSpaceCollapse::Collapse) | None => true,
         }
@@ -1305,11 +1315,15 @@ impl Node {
     /// block's hoisted child list rather than from its parent (`display: none` boxes
     /// generate no box and are never hoisted).
     pub fn is_out_of_flow(&self) -> bool {
-        self.primary_styles().is_some_and(|s| {
-            let box_style = s.get_box();
-            stylo_taffy::convert::position(box_style.position).is_out_of_flow()
-                && stylo_taffy::convert::display(box_style.display) != taffy::Display::None
-        })
+        self.primary_styles()
+            .is_some_and(|s| style_is_out_of_flow(&s))
+    }
+
+    /// Record in [`Node::out_of_flow`] whether `style` (the node's new primary style)
+    /// makes its box out of flow.
+    pub(crate) fn record_out_of_flow(&self, style: &ComputedValues) {
+        self.out_of_flow
+            .store(style_is_out_of_flow(style), Ordering::Relaxed);
     }
 
     pub fn text_content(&self) -> String {
@@ -1453,7 +1467,7 @@ impl Node {
             return true;
         }
 
-        if !matches!(style.clone_clip_path(), ClipPath::None) {
+        if !matches!(style.get_clip_path(), ClipPath::None) {
             return true;
         }
 
@@ -2055,6 +2069,15 @@ impl std::fmt::Debug for Node {
             // .field("final_layout", &self.final_layout)
             .finish()
     }
+}
+
+/// Whether a box with `style` is out of flow: Taffy positions it from its containing
+/// block's hoisted child list rather than from its parent (`display: none` boxes generate
+/// no box and are never hoisted).
+pub(crate) fn style_is_out_of_flow(style: &ComputedValues) -> bool {
+    let box_style = style.get_box();
+    matches!(box_style.position, Position::Absolute | Position::Fixed)
+        && !box_style.display.is_none()
 }
 
 #[cfg(test)]

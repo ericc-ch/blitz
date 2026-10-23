@@ -445,6 +445,10 @@ impl DocumentMutator<'_> {
             element.id = Some(Atom::from(value))
         }
 
+        if *attr == local_name!("class") {
+            element.classes = crate::node::parse_classes(value);
+        }
+
         if *attr == local_name!("value") {
             // A dirty value keeps the current value when the attribute changes
             // (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>).
@@ -581,6 +585,10 @@ impl DocumentMutator<'_> {
 
         if name.local == local_name!("id") {
             element.id = None;
+        }
+
+        if name.local == local_name!("class") {
+            element.classes.clear();
         }
 
         // As in `set_attribute`: taking one of these away can make the element
