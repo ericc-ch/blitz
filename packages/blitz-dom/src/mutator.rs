@@ -1566,6 +1566,7 @@ impl<'doc> DocumentMutator<'doc> {
                     .pending_images
                     .insert(src_string.to_string(), vec![(target_id, ImageType::Image)]);
 
+                let source_url = src_string.to_string();
                 self.doc.net_provider.fetch(
                     self.doc.id(),
                     self.doc.build_request(src).kind(blitz_traits::net::RequestKind::Image),
@@ -1574,7 +1575,7 @@ impl<'doc> DocumentMutator<'doc> {
                         self.doc.id(),
                         None, // Don't pass node_id, we'll handle it via pending_images
                         self.doc.shell_provider.clone(),
-                        ImageHandler::new(ImageType::Image),
+                        ImageHandler::new(ImageType::Image, source_url),
                     ),
                 );
             }

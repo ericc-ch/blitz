@@ -613,7 +613,7 @@ impl BaseDocument {
                                 doc_id,
                                 None, // Don't pass node_id, we'll handle via pending_images
                                 self.shell_provider.clone(),
-                                ImageHandler::new(kind.image_type(idx)),
+                                ImageHandler::new(kind.image_type(idx), url_str.to_string()),
                             ),
                         );
 

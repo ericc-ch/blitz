@@ -554,17 +554,21 @@ impl NetHandler for ResourceHandler<DocumentSrcHandler> {
 
 pub struct ImageHandler {
     kind: ImageType,
+    /// The URL the request went out under, which `pending_images` is keyed
+    /// by. The provider hands back the post-redirect URL, so applying the
+    /// decoded image under it would never match the request.
+    source_url: String,
 }
 impl ImageHandler {
-    pub fn new(kind: ImageType) -> Self {
-        Self { kind }
+    pub fn new(kind: ImageType, source_url: String) -> Self {
+        Self { kind, source_url }
     }
 }
 
 impl NetHandler for ResourceHandler<ImageHandler> {
-    fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
+    fn bytes(self: Box<Self>, _resolved_url: String, bytes: Bytes) {
         let result = self.data.parse(bytes);
-        self.respond(resolved_url, result)
+        self.respond(self.data.source_url.clone(), result)
     }
 }
 
