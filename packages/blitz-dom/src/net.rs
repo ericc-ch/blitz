@@ -162,6 +162,7 @@ impl NetHandler for ResourceHandler<StylesheetHandler> {
                 shell_provider: self.shell_provider.clone(),
                 abort_signal: self.data.abort_signal.clone(),
                 import_depth: 0,
+                sheet_url: Some(self.data.source_url.clone()),
             }),
             None, // error_reporter
             QuirksMode::NoQuirks,
@@ -191,6 +192,10 @@ pub(crate) struct StylesheetLoader {
     /// Depth of `@import` nesting for the stylesheet this loader is parsing
     /// (0 for a top-level stylesheet)
     pub(crate) import_depth: usize,
+    /// Location of the stylesheet this loader is parsing, if it has one. A
+    /// nested sheet's request uses it as its referrer
+    /// (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+    pub(crate) sheet_url: Option<Url>,
 }
 impl ServoStylesheetLoader for StylesheetLoader {
     fn request_stylesheet(
@@ -225,7 +230,8 @@ impl ServoStylesheetLoader for StylesheetLoader {
         self.net_provider.fetch(
             self.doc_id,
             stamped_request(url.as_ref().clone(), self.abort_signal.as_ref())
-                .kind(RequestKind::Stylesheet),
+                .kind(RequestKind::Stylesheet)
+                .style_sheet(self.sheet_url.clone()),
             ResourceHandler::boxed(
                 self.tx.clone(),
                 self.doc_id,
@@ -266,14 +272,21 @@ impl NetHandler for ResourceHandler<NestedStylesheetHandler> {
 
         // NOTE(Nico): I don't *think* external stylesheets should have HTML entities escaped
         // let escaped_css = html_escape::decode_html_entities(css);
-
+        let loader = StylesheetLoader {
+            // The sheet being parsed is the one this URL names: any `@import`
+            // inside it uses this URL as its referrer, not the importing
+            // sheet's
+            // (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+            sheet_url: Some(self.data.url.as_ref().clone()),
+            ..self.data.loader.clone()
+        };
         let sheet = ServoArc::new(Stylesheet::from_str(
             css,
             UrlExtraData(self.data.url.clone()),
             Origin::Author,
             self.data.media.clone(),
             self.data.lock.clone(),
-            Some(&self.data.loader),
+            Some(&loader),
             None, // error_reporter
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
@@ -391,6 +404,10 @@ pub(crate) fn fetch_font_face(
 ) {
     fetch_font_face_rules(
         sheet.contents(read_guard).rules(read_guard).iter(),
+        // The sheet's location is the referrer for every font it names, and
+        // its response carried the policy the embedder applies
+        // (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+        Some(sheet.contents(read_guard).url_data.0.as_ref().clone()),
         tx,
         doc_id,
         node_id,
@@ -405,6 +422,7 @@ pub(crate) fn fetch_font_face(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_font_face_rules<'a>(
     rules: impl Iterator<Item = &'a CssRule>,
+    style_sheet: Option<Url>,
     tx: Sender<DocumentEvent>,
     doc_id: usize,
     node_id: Option<NodeId>,
@@ -506,7 +524,9 @@ pub(crate) fn fetch_font_face_rules<'a>(
             if let Some((url, format)) = preferred_source {
                 network_provider.fetch(
                     doc_id,
-                    stamped_request(url, abort_signal).kind(RequestKind::Font),
+                    stamped_request(url, abort_signal)
+                        .kind(RequestKind::Font)
+                        .style_sheet(style_sheet.clone()),
                     ResourceHandler::boxed(
                         tx.clone(),
                         doc_id,

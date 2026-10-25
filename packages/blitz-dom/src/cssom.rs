@@ -378,6 +378,10 @@ impl BaseDocument {
             shell_provider: self.shell_provider.clone(),
             abort_signal: self.abort_signal.clone(),
             import_depth: 0,
+            // A rule inserted through the CSSOM has no sheet location to
+            // refer with, so its subresource requests use the document's
+            // referrer and policy.
+            sheet_url: None,
         }
     }
 
@@ -585,8 +589,13 @@ impl BaseDocument {
         let guard = lock.read();
         if live {
             if let CssRule::FontFace(_) = &new_rule {
+                // The owning sheet's location is not reachable from a rule
+                // list here, so the document's own referrer and policy apply
+                // to a font this CSSOM insertion introduces. `insertRule` on a
+                // linked sheet is the uncovered case.
                 crate::net::fetch_font_face_rules(
                     std::iter::once(&new_rule),
+                    None,
                     self.tx.clone(),
                     self.id(),
                     Some(owner),

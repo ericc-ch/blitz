@@ -1373,6 +1373,10 @@ impl BaseDocument {
                 shell_provider: self.shell_provider.clone(),
                 abort_signal: self.abort_signal.clone(),
                 import_depth: 0,
+                // An inline `<style>` sheet has no location of its own, so its
+                // requests use the document's referrer and policy
+                // (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+                sheet_url: None,
             }),
             None,
             self.quirks_mode(),

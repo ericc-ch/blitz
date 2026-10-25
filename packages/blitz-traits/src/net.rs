@@ -61,6 +61,12 @@ pub struct Request {
     /// this instead of guessing from the URL
     /// (<https://fetch.spec.whatwg.org/#concept-request-destination>).
     pub kind: RequestKind,
+    /// The CSS style sheet responsible for this request, when one is: the
+    /// sheet's location is the request's referrer, and its response's
+    /// `Referrer-Policy` is the request's policy
+    /// (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+    /// `None` for requests a document or an element initiates.
+    pub style_sheet: Option<Url>,
 }
 
 /// The resource family a request belongs to.
@@ -88,6 +94,7 @@ impl Request {
             body: Body::Empty,
             signal: None,
             kind: RequestKind::Other,
+            style_sheet: None,
         }
     }
 
@@ -99,6 +106,14 @@ impl Request {
     /// Marks what the request fetches.
     pub fn kind(mut self, kind: RequestKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Marks the CSS style sheet this request belongs to, when one is
+    /// responsible for it
+    /// (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+    pub fn style_sheet(mut self, url: Option<Url>) -> Self {
+        self.style_sheet = url;
         self
     }
 }
