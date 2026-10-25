@@ -47,7 +47,13 @@ enum SpecialOp {
     LoadImage(NodeId),
     LoadIframe(NodeId),
     LoadStylesheet(NodeId),
+    /// A `<?xml-stylesheet?>` processing instruction names a style sheet
+    /// (<https://www.w3.org/TR/xml-stylesheet/>).
+    LoadStylesheetPi(NodeId),
     UnloadStylesheet(NodeId),
+    /// Drops the sheet a processing instruction owned; it has no element
+    /// special data to take.
+    UnloadStylesheetPi(NodeId),
     LoadCustomPaintSource(NodeId),
     ProcessButtonInput(NodeId),
     UnloadSubDocument(NodeId),
@@ -1191,7 +1197,9 @@ impl<'doc> DocumentMutator<'doc> {
                 SpecialOp::LoadImage(node_id) => self.load_image(node_id),
                 SpecialOp::LoadIframe(node_id) => self.load_iframe(node_id),
                 SpecialOp::LoadStylesheet(node_id) => self.load_linked_stylesheet(node_id),
+                SpecialOp::LoadStylesheetPi(node_id) => self.load_pi_stylesheet(node_id),
                 SpecialOp::UnloadStylesheet(node_id) => self.unload_stylesheet(node_id),
+                SpecialOp::UnloadStylesheetPi(node_id) => self.unload_pi_stylesheet(node_id),
                 SpecialOp::LoadCustomPaintSource(node_id) => self.load_custom_paint_src(node_id),
                 SpecialOp::ProcessButtonInput(node_id) => self.process_button_input(node_id),
                 SpecialOp::UnloadSubDocument(node_id) => self.remove_sub_document(node_id),
@@ -1217,6 +1225,17 @@ impl<'doc> DocumentMutator<'doc> {
 
             let in_shadow = node_inside_shadow(doc, node_id);
             let node = &mut doc.nodes[node_id];
+            // An `xml-stylesheet` processing instruction loads a style sheet
+            // like `<link rel=stylesheet>` does; HTML keeps the instruction for
+            // compatibility with XML-authored sheets
+            // (<https://www.w3.org/TR/xml-stylesheet/>).
+            if let NodeData::ProcessingInstruction { target, .. } = &node.data
+                && target.eq_ignore_ascii_case("xml-stylesheet")
+            {
+                self.eager_op_queue
+                    .push(SpecialOp::LoadStylesheetPi(node_id));
+                return;
+            }
             let NodeData::Element(ref mut element) = node.data else {
                 return;
             };
@@ -1310,6 +1329,14 @@ impl<'doc> DocumentMutator<'doc> {
 
             let node = &mut doc.nodes[node_id];
             let NodeData::Element(ref mut element) = node.data else {
+                // A processing instruction can own a style sheet; it has no
+                // element storage, so the unload path differs.
+                if matches!(&node.data, NodeData::ProcessingInstruction { .. })
+                    && doc.nodes_to_stylesheet.contains_key(&node_id)
+                {
+                    self.eager_op_queue
+                        .push(SpecialOp::UnloadStylesheetPi(node_id));
+                }
                 return;
             };
 
@@ -1477,10 +1504,16 @@ impl<'doc> DocumentMutator<'doc> {
             // are a known gap.
             return;
         };
+        self.fetch_stylesheet(target_id, url, is_in_head);
+    }
+
+    /// Fetches the sheet at `url` for its owning node and files the response
+    /// under that node. A sheet in `head` delays the document's load event.
+    fn fetch_stylesheet(&mut self, owner: NodeId, url: url::Url, critical: bool) {
         let handler = ResourceHandler::new(
             self.doc.tx.clone(),
             self.doc.id(),
-            Some(node.id),
+            Some(owner),
             self.doc.shell_provider.clone(),
             StylesheetHandler {
                 source_url: url.clone(),
@@ -1490,7 +1523,7 @@ impl<'doc> DocumentMutator<'doc> {
             },
         );
 
-        if is_in_head && !self.doc.net_provider.is_noop() {
+        if critical && !self.doc.net_provider.is_noop() {
             self.doc
                 .pending_critical_resources
                 .insert(handler.request_id());
@@ -1498,9 +1531,49 @@ impl<'doc> DocumentMutator<'doc> {
 
         self.doc.net_provider.fetch(
             self.doc.id(),
-            self.doc.build_request(url).kind(blitz_traits::net::RequestKind::Stylesheet),
+            self.doc
+                .build_request(url)
+                .kind(blitz_traits::net::RequestKind::Stylesheet),
             Box::new(handler),
         );
+    }
+
+    /// Loads the sheet an `xml-stylesheet` processing instruction names
+    /// (<https://www.w3.org/TR/xml-stylesheet/>). The pseudo-attribute values
+    /// are XML, so `&amp;` in an `href` is the character, not five bytes of
+    /// URL.
+    fn load_pi_stylesheet(&mut self, node_id: NodeId) {
+        let Some((target, contents)) = self.doc.nodes.get(node_id).and_then(|node| {
+            let NodeData::ProcessingInstruction { target, contents } = &node.data else {
+                return None;
+            };
+            Some((target.clone(), contents.clone()))
+        }) else {
+            return;
+        };
+        if !target.eq_ignore_ascii_case("xml-stylesheet") {
+            return;
+        }
+        let attributes = pi_pseudo_attributes(&contents);
+        let value = |name: &str| {
+            attributes
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let Some(href) = value("href") else {
+            return;
+        };
+        if let Some(typ) = value("type")
+            && !typ.trim().is_empty()
+            && !typ.trim().eq_ignore_ascii_case("text/css")
+        {
+            return;
+        }
+        let Some(url) = self.doc.resolve_url(href) else {
+            return;
+        };
+        self.fetch_stylesheet(node_id, url, false);
     }
 
     fn unload_stylesheet(&mut self, node_id: NodeId) {
@@ -1523,6 +1596,25 @@ impl<'doc> DocumentMutator<'doc> {
         // The CSSOM sheet object outlives the owner. It stays readable and
         // editable; it just leaves the document cascade
         // (<https://drafts.csswg.org/cssom/#remove-a-css-style-sheet>).
+        self.doc.detach_cssom_sheet(node_id);
+        self.doc.stylesheet_generation += 1;
+    }
+
+    /// Drops the sheet a processing instruction owned. A PI has no element
+    /// special data, so the owner map and the stylist are updated directly
+    /// (<https://www.w3.org/TR/xml-stylesheet/>).
+    fn unload_pi_stylesheet(&mut self, node_id: NodeId) {
+        let Some(stylesheet) = self.doc.nodes_to_stylesheet.remove(&node_id) else {
+            return;
+        };
+
+        let guard = self.doc.guard.read();
+        self.doc.stylist.remove_stylesheet(stylesheet, &guard);
+        self.doc
+            .stylist
+            .force_stylesheet_origins_dirty(OriginSet::all());
+        drop(guard);
+
         self.doc.detach_cssom_sheet(node_id);
         self.doc.stylesheet_generation += 1;
     }
@@ -1731,6 +1823,82 @@ impl Drop for ViewportMut<'_> {
         let changes = DeviceChanges::from_viewports(&self.initial_viewport, &self.doc.viewport);
         self.doc.queue_device_changes(changes);
     }
+}
+
+/// The pseudo-attributes of one `xml-stylesheet` processing instruction:
+/// `name = "value"` pairs, single or double quoted, separated by whitespace
+/// (<https://www.w3.org/TR/xml-stylesheet/#dt-pseudo-attribute>).
+fn pi_pseudo_attributes(contents: &str) -> Vec<(String, String)> {
+    let mut attributes = Vec::new();
+    let mut rest = contents;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let Some(name_end) = rest.find(|c: char| c.is_ascii_whitespace() || c == '=') else {
+            break;
+        };
+        let name = &rest[..name_end];
+        rest = rest[name_end..].trim_start();
+        let Some(after_eq) = rest.strip_prefix('=') else {
+            // Not a pseudo-attribute; `name` was consumed, so the scan moves on.
+            continue;
+        };
+        rest = after_eq.trim_start();
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        rest = &rest[quote.len_utf8()..];
+        let Some(end) = rest.find(quote) else {
+            break;
+        };
+        attributes.push((name.to_owned(), xml_decode(&rest[..end])));
+        rest = &rest[end + quote.len_utf8()..];
+    }
+    attributes
+}
+
+/// Decodes the predefined XML entities and numeric character references in
+/// one attribute value
+/// (<https://www.w3.org/TR/xml/#sec-references>). PI data is not parsed as
+/// markup, so this is the only place those references become characters.
+fn xml_decode(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('&') {
+        decoded.push_str(&rest[..start]);
+        let entity = &rest[start + 1..];
+        let Some(end) = entity.find(';') else {
+            decoded.push_str(&rest[start..]);
+            return decoded;
+        };
+        let reference = &entity[..end];
+        let character = match reference {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => reference
+                .strip_prefix("#x")
+                .or_else(|| reference.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| {
+                    reference
+                        .strip_prefix('#')
+                        .and_then(|dec| dec.parse::<u32>().ok())
+                })
+                .and_then(char::from_u32),
+        };
+        match character {
+            Some(character) => decoded.push(character),
+            None => decoded.push_str(&rest[start..=start + end]),
+        }
+        rest = &entity[end + 1..];
+    }
+    decoded.push_str(rest);
+    decoded
 }
 
 #[cfg(test)]

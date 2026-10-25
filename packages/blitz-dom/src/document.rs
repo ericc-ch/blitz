@@ -1536,9 +1536,13 @@ impl BaseDocument {
             self.abort_signal.as_ref(),
         );
 
-        // Store data on element
-        let element = &mut self.nodes[node_id].element_data_mut().unwrap();
-        element.special_data = SpecialElementData::Stylesheet(stylesheet.clone());
+        // Store data on element. A processing instruction owns its sheet
+        // without element storage; the owner map still records its tree
+        // position
+        // (<https://www.w3.org/TR/xml-stylesheet/#the-xml-stylesheet-processing-instruction>).
+        if let Some(element) = self.nodes[node_id].element_data_mut() {
+            element.special_data = SpecialElementData::Stylesheet(stylesheet.clone());
+        }
 
         self.insert_stylesheet_in_tree_order(node_id, stylesheet);
     }
