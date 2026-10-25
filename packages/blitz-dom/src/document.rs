@@ -2660,6 +2660,14 @@ impl BaseDocument {
         self.stylist.device()
     }
 
+    /// The current stylo [`Device`] without flushing pending changes.
+    ///
+    /// Read-only callers (value sanitization, hit testing) cannot force a
+    /// restyle; the device is current as of the last [`Self::resolve`].
+    pub fn device(&self) -> &Device {
+        self.stylist.device()
+    }
+
     pub fn get_cursor(&self) -> Option<CursorIcon> {
         // Prefer the precise hit node: `cursor` and `user-select` may be set on
         // a pseudo-element or resolved on an anonymous box, and text hits carry
