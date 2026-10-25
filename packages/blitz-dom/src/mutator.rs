@@ -1466,7 +1466,13 @@ impl<'doc> DocumentMutator<'doc> {
 
         match tag_name.as_ref() {
             "title" => self.title_node = Some(node_id),
-            "style" if !self.inside_shadow(node_id) => {
+            // A `<style>` element applies only while it is in the document; a
+            // text change on a detached one must not attach a sheet
+            // (<https://html.spec.whatwg.org/multipage/semantics.html#the-style-element>).
+            "style"
+                if !self.inside_shadow(node_id)
+                    && self.doc.nodes[node_id].flags.is_in_document() =>
+            {
                 self.style_nodes.insert(node_id);
             }
             _ => {}
@@ -1661,7 +1667,9 @@ impl<'doc> DocumentMutator<'doc> {
                 let source_url = src_string.to_string();
                 self.doc.net_provider.fetch(
                     self.doc.id(),
-                    self.doc.build_request(src).kind(blitz_traits::net::RequestKind::Image),
+                    self.doc
+                        .build_request(src)
+                        .kind(blitz_traits::net::RequestKind::Image),
                     ResourceHandler::boxed(
                         self.doc.tx.clone(),
                         self.doc.id(),

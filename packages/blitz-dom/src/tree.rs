@@ -1,10 +1,12 @@
 //! Versioned storage for the nodes of the DOM tree.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use selectors::matching::QuirksMode;
+use style::servo_arc::Arc as ServoArc;
+use url::Url;
 
 use blitz_traits::node_id::NodeId;
 use slotmap::{Key as _, KeyData, SlotMap};
@@ -50,6 +52,11 @@ pub struct NodeTree {
     quirks_mode: Cell<QuirksMode>,
     /// Set when the caller supplied a mode. The parser must not replace it.
     quirks_locked: Cell<bool>,
+    /// The document's base URL. Nodes read it through their tree pointer when
+    /// they synthesize a presentational hint that carries a URL, such as the
+    /// `background` content attribute
+    /// (<https://html.spec.whatwg.org/multipage/rendering.html#the-background-attribute>).
+    base_url: RefCell<Option<ServoArc<Url>>>,
 }
 
 impl NodeTree {
@@ -60,11 +67,22 @@ impl NodeTree {
             viewport_scroll: crate::Point::ZERO,
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             quirks_locked: Cell::new(false),
+            base_url: RefCell::new(None),
         }
     }
 
     pub fn quirks_mode(&self) -> QuirksMode {
         self.quirks_mode.get()
+    }
+
+    /// Resolves `raw` against the document's base URL, returning `None` when
+    /// no base URL is known yet or the reference does not resolve.
+    pub fn resolve_relative(&self, raw: &str) -> Option<Url> {
+        self.base_url.borrow().as_ref()?.join(raw).ok()
+    }
+
+    pub(crate) fn set_base_url(&self, url: ServoArc<Url>) {
+        *self.base_url.borrow_mut() = Some(url);
     }
 
     pub(crate) fn set_quirks_mode(&self, mode: QuirksMode) {

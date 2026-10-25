@@ -390,6 +390,15 @@ pub struct BaseDocument {
     /// the style traversal and by pseudo-element box construction).
     pub(crate) pending_style_image_nodes: Vec<NodeId>,
 
+    /// Image URLs a style sheet references, mapped to the sheet that declared
+    /// them. A request a sheet initiates sends the sheet's URL as its referrer
+    /// and applies the sheet response's `Referrer-Policy`, not the document's
+    /// (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+    /// Computed style keeps no declaration provenance, so the sheet's URL is
+    /// recorded here when the sheet is parsed and looked up when its images are
+    /// fetched.
+    pub(crate) image_referrers: HashMap<String, url::Url>,
+
     // Tracks in-flight "critical" resources (e.g. stylesheets linked from the `<head>`),
     // keyed by request id
     pub(crate) pending_critical_resources: HashSet<usize>,
@@ -443,7 +452,6 @@ impl BaseDocument {
     pub fn font_context(&self) -> Arc<Mutex<parley::FontContext>> {
         self.font_ctx.clone()
     }
-
 
     /// Create a new (empty) [`BaseDocument`] with the specified configuration
     pub fn new(config: DocumentConfig) -> Self {
@@ -532,6 +540,7 @@ impl BaseDocument {
             .base_url
             .and_then(|url| DocumentUrl::from_str(&url).ok())
             .unwrap_or_default();
+        nodes.set_base_url(base_url.shared());
 
         let net_provider = config
             .net_provider
@@ -601,6 +610,7 @@ impl BaseDocument {
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
             pending_style_image_nodes: Vec::new(),
+            image_referrers: HashMap::new(),
             pending_critical_resources: HashSet::new(),
             parse_errors: Vec::new(),
             controls_to_form: HashMap::new(),
@@ -666,7 +676,9 @@ impl BaseDocument {
 
     /// Set base url for resolving linked resources (stylesheets, images, fonts, etc)
     pub fn set_base_url(&mut self, url: &str) {
-        self.url = DocumentUrl::from(Url::parse(url).unwrap());
+        let parsed = DocumentUrl::from(Url::parse(url).unwrap());
+        self.nodes.set_base_url(parsed.shared());
+        self.url = parsed;
     }
 
     /// The base url used for resolving linked resources (stylesheets, images, fonts, etc)
@@ -1359,6 +1371,25 @@ impl BaseDocument {
         self.stylist.append_stylesheet(sheet.0, &self.guard.read());
     }
 
+    /// Records the image URLs `sheet` references, so the image requests it
+    /// triggers send the sheet's URL as their referrer
+    /// (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+    /// `response_url` is the URL the sheet was fetched from, which differs from
+    /// the URL that was requested when the response redirected.
+    fn record_sheet_images(&mut self, sheet: &Stylesheet, response_url: Option<&str>) {
+        use style::stylesheets::StylesheetInDocument;
+        let Some(sheet_url) = response_url.and_then(|raw| url::Url::parse(raw).ok()) else {
+            return;
+        };
+        let guard = self.guard.read();
+        crate::sheet_images::record_image_referrers(
+            sheet.contents(&guard).rules(&guard),
+            &guard,
+            &sheet_url,
+            &mut self.image_referrers,
+        );
+    }
+
     pub fn make_stylesheet(&self, css: impl AsRef<str>, origin: Origin) -> DocumentStyleSheet {
         let data = Stylesheet::from_str(
             css.as_ref(),
@@ -1684,6 +1715,7 @@ impl BaseDocument {
         match resource {
             Resource::Css(css) => {
                 let node_id = res.node_id.unwrap();
+                self.record_sheet_images(&css.0, res.resolved_url.as_deref());
                 self.add_stylesheet_for_node(css, node_id);
                 let clean = res
                     .resolved_url
@@ -1692,6 +1724,7 @@ impl BaseDocument {
                 self.set_cssom_origin_clean(node_id, clean);
             }
             Resource::ImportedCss(import_rule, sheet) => {
+                self.record_sheet_images(&sheet, res.resolved_url.as_deref());
                 let mut guard = self.guard.write();
                 import_rule.write_with(&mut guard).stylesheet =
                     style::stylesheets::import_rule::ImportSheet::Sheet(sheet);
@@ -1805,11 +1838,12 @@ impl BaseDocument {
                     node.clear_layout_cache();
                     node.insert_damage(ALL_DAMAGE);
                 }
-                ImageType::Background(idx) | ImageType::Mask(idx) => {
+                ImageType::Background(idx) | ImageType::Mask(idx) | ImageType::Content(idx) => {
                     let layer_image = node.element_data_mut().and_then(|el| {
                         let images = match image_type {
                             ImageType::Background(_) => &mut el.background_images,
                             ImageType::Mask(_) => &mut el.mask_images,
+                            ImageType::Content(_) => &mut el.content_images,
                             ImageType::Image => unreachable!(),
                         };
                         images.get_mut(idx)

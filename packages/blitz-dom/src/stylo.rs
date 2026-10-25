@@ -1270,6 +1270,34 @@ impl<'a> TElement for BlitzNode<'a> {
                 }
             }
 
+            // The `background` attribute on `body` and the table family maps
+            // to `background-image`
+            // (<https://html.spec.whatwg.org/multipage/rendering.html#the-background-attribute>).
+            // Its value is parsed relative to the element's node document.
+            let takes_background = *tag == local_name!("body")
+                || *tag == local_name!("table")
+                || *tag == local_name!("thead")
+                || *tag == local_name!("tbody")
+                || *tag == local_name!("tfoot")
+                || *tag == local_name!("tr")
+                || *tag == local_name!("td")
+                || *tag == local_name!("th");
+            if *name == local_name!("background") && takes_background && !value.is_empty() {
+                if let Some(url) = self.tree().resolve_relative(value) {
+                    use style::properties::longhands::background_image;
+                    use style::servo_arc::Arc as ServoArc;
+                    use style::values::CssUrl;
+                    push_style(PropertyDeclaration::BackgroundImage(
+                        background_image::SpecifiedValue(
+                            vec![style::values::specified::Image::Url(CssUrl::for_cascade(
+                                ServoArc::new(url),
+                            ))]
+                            .into(),
+                        ),
+                    ));
+                }
+            }
+
             if *name == local_name!("hidden") {
                 use style::values::specified::Display;
                 push_style(PropertyDeclaration::Display(Display::None));
@@ -1572,6 +1600,24 @@ fn needs_style_image_flush(node: &Node, style: &ComputedValues) -> bool {
             &style.get_background().background_image.0,
             &el.background_images,
         ) || out_of_sync(&style.get_svg().mask_image.0, &el.mask_images)
+            || content_out_of_sync(style, &el.content_images)
+    })
+}
+
+/// Whether the URLs a `content` value names differ from the images currently
+/// stored on the node, in the same shape as the layer-list comparison above.
+fn content_out_of_sync(
+    style: &ComputedValues,
+    stored: &[Option<crate::node::ImageResourceData>],
+) -> bool {
+    let urls = crate::layout::damage::content_urls(style);
+    if urls.len() != stored.len() {
+        return urls.iter().any(Option::is_some) || stored.iter().any(Option::is_some);
+    }
+    std::iter::zip(urls, stored).any(|(url, stored)| match (url, stored) {
+        (Some(url), Some(data)) => *url != *data.url,
+        (Some(_), None) => true,
+        (None, stored) => stored.is_some(),
     })
 }
 

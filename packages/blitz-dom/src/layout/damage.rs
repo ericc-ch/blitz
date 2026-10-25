@@ -13,6 +13,7 @@ use style::matching::StyleChange;
 use style::properties::ComputedValues;
 use style::properties::generated::longhands::position::computed_value::T as Position;
 use style::selector_parser::{PseudoElement, RestyleDamage};
+use style::servo_arc::Arc as ServoArc;
 use style::shared_lock::StylesheetGuards;
 use style::url::ComputedUrl;
 use style::values::generics::image::Image as StyloImage;
@@ -20,6 +21,7 @@ use style::values::specified::align::AlignFlags;
 use style::values::specified::box_::DisplayInside;
 use style::values::specified::box_::DisplayOutside;
 use thin_vec::ThinVec;
+use url::Url;
 
 // Blitz-specific damage bits, in increasing order of severity above Servo's
 // `RestyleDamage::RELAYOUT` (0b1111).
@@ -532,11 +534,13 @@ impl BaseDocument {
             }
             self.flush_image_layers_from_style(node_id, ImageLayerKind::Background);
             self.flush_image_layers_from_style(node_id, ImageLayerKind::Mask);
+            self.flush_image_layers_from_style(node_id, ImageLayerKind::Content);
         }
     }
 
-    /// Flush a CSS image layer list (`background-image` or `mask-image`) from style
-    /// to dedicated storage on the node, fetching any images which are not yet loaded.
+    /// Flush a CSS image layer list (`background-image`, `mask-image`, or the
+    /// images `content` names) from style to dedicated storage on the node,
+    /// fetching any images which are not yet loaded.
     fn flush_image_layers_from_style(&mut self, node_id: NodeId, kind: ImageLayerKind) {
         let doc_id = self.id();
         let node = self.nodes.get_mut(node_id).unwrap();
@@ -557,21 +561,26 @@ impl BaseDocument {
             return;
         };
 
-        let (style_images, elem_images) = match kind {
-            ImageLayerKind::Background => (
-                &style.get_background().background_image.0,
-                &mut elem.background_images,
-            ),
-            ImageLayerKind::Mask => (&style.get_svg().mask_image.0, &mut elem.mask_images),
+        // Each kind's style-side URLs, in layer order. A layer that names a
+        // gradient or `none` keeps its slot with no URL, so stored indices
+        // stay aligned with the style list.
+        let urls = match kind {
+            ImageLayerKind::Background => layer_urls(&style.get_background().background_image.0),
+            ImageLayerKind::Mask => layer_urls(&style.get_svg().mask_image.0),
+            ImageLayerKind::Content => content_urls(&style),
+        };
+        let elem_images = match kind {
+            ImageLayerKind::Background => &mut elem.background_images,
+            ImageLayerKind::Mask => &mut elem.mask_images,
+            ImageLayerKind::Content => &mut elem.content_images,
         };
 
-        let len = style_images.len();
+        let len = urls.len();
         elem_images.resize(len, None);
 
-        for idx in 0..len {
-            let style_image = &style_images[idx];
-            let new_image = match style_image {
-                StyloImage::Url(ComputedUrl::Valid(new_url)) => {
+        for (idx, url) in urls.iter().enumerate() {
+            let new_image = match url {
+                Some(new_url) => {
                     let old_image = elem_images[idx].as_ref();
                     let old_image_url = old_image.map(|data| &data.url);
                     if old_image_url.is_some_and(|old_url| **new_url == **old_url) {
@@ -601,13 +610,19 @@ impl BaseDocument {
                         self.pending_images
                             .insert(url_str.to_string(), vec![(node_id, kind.image_type(idx))]);
 
+                        // A URL a style sheet declared sends that sheet as its
+                        // referrer; one from an inline `<style>` or `style`
+                        // attribute keeps the document's
+                        // (<https://w3c.github.io/webappsec-referrer-policy/#integration-with-css>).
+                        let style_sheet = self.image_referrers.get(url_str).cloned();
                         self.net_provider.fetch(
                             doc_id,
                             crate::net::stamped_request(
                                 (**new_url).clone(),
                                 self.abort_signal.as_ref(),
                             )
-                            .kind(blitz_traits::net::RequestKind::Image),
+                            .kind(blitz_traits::net::RequestKind::Image)
+                            .style_sheet(style_sheet),
                             ResourceHandler::boxed(
                                 self.tx.clone(),
                                 doc_id,
@@ -620,11 +635,43 @@ impl BaseDocument {
                         Some(ImageResourceData::new(new_url.clone()))
                     }
                 }
-                _ => None,
+                None => None,
             };
 
             // Element will always exist due to resize_with above
             elem_images[idx] = new_image;
         }
     }
+}
+
+/// The URLs one `background-image` / `mask-image` list names, in list order.
+pub(crate) fn layer_urls(
+    images: &[style::values::computed::image::Image],
+) -> Vec<Option<ServoArc<Url>>> {
+    images
+        .iter()
+        .map(|image| match image {
+            StyloImage::Url(ComputedUrl::Valid(url)) => Some(url.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The URLs one `content` value's rendered items name, in item order.
+///
+/// Items past `alt_start` are alternative text for assistive technology, never
+/// rendered and never fetched
+/// (<https://drafts.csswg.org/css-content/#content-property>).
+pub(crate) fn content_urls(style: &ComputedValues) -> Vec<Option<ServoArc<Url>>> {
+    use style::values::computed::counters::{Content, ContentItem};
+    let Content::Items(items) = &style.get_counters().content else {
+        return Vec::new();
+    };
+    items.items[..items.alt_start]
+        .iter()
+        .map(|item| match item {
+            ContentItem::Image(StyloImage::Url(ComputedUrl::Valid(url))) => Some(url.clone()),
+            _ => None,
+        })
+        .collect()
 }

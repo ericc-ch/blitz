@@ -79,6 +79,11 @@ pub struct ElementData {
 
     pub mask_images: ThinVec<Option<ImageResourceData>>,
 
+    /// The images a `content` value names, fetched because the property makes
+    /// them load even when nothing paints them
+    /// (<https://drafts.csswg.org/css-content/#content-property>).
+    pub content_images: ThinVec<Option<ImageResourceData>>,
+
     /// Parley text layout (elements with inline inner display mode only)
     pub inline_layout_data: Option<Box<TextLayout>>,
 
@@ -320,6 +325,7 @@ impl std::fmt::Debug for ElementData {
             .field("special_data", &self.special_data)
             .field("background_images", &self.background_images)
             .field("mask_images", &self.mask_images)
+            .field("content_images", &self.content_images)
             .field("inline_layout_data", &self.inline_layout_data)
             .field("list_item_data", &self.list_item_data)
             .field("template_contents", &self.template_contents)
@@ -346,6 +352,7 @@ impl Clone for ElementData {
             special_data: self.special_data.clone(),
             background_images: self.background_images.clone(),
             mask_images: self.mask_images.clone(),
+            content_images: self.content_images.clone(),
             inline_layout_data: self.inline_layout_data.clone(),
             list_item_data: self.list_item_data.clone(),
             template_contents: self.template_contents,
@@ -473,6 +480,7 @@ impl ElementData {
             form_state: FormControlState::default(),
             background_images: ThinVec::new(),
             mask_images: ThinVec::new(),
+            content_images: ThinVec::new(),
 
             stylo_element_data: Default::default(),
             selector_flags: Cell::new(ElementSelectorFlags::empty()),

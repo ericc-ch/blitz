@@ -50,12 +50,13 @@ pub(crate) static FONT_DB: LazyLock<Arc<fontdb::Database>> = LazyLock::new(|| {
     Arc::new(db)
 });
 
-/// Which kind of CSS image layer list (`background-image` or `mask-image`) to
-/// flush from style to dedicated storage on the node.
+/// Which kind of CSS image layer list (`background-image`, `mask-image`, or the
+/// images `content` names) to flush from style to dedicated storage on the node.
 #[derive(Clone, Copy, Debug)]
 pub enum ImageLayerKind {
     Background,
     Mask,
+    Content,
 }
 
 impl ImageLayerKind {
@@ -63,6 +64,7 @@ impl ImageLayerKind {
         match self {
             Self::Background => ImageType::Background(idx),
             Self::Mask => ImageType::Mask(idx),
+            Self::Content => ImageType::Content(idx),
         }
     }
 }
@@ -72,6 +74,7 @@ pub enum ImageType {
     Image,
     Background(usize),
     Mask(usize),
+    Content(usize),
 }
 
 /// A point

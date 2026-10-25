@@ -59,6 +59,8 @@ mod resolved_style;
 /// Scrolling of nodes and the viewport, and scroll animations.
 mod scrolling;
 mod selection;
+/// The style sheet each image URL a sheet references belongs to.
+mod sheet_images;
 /// Implementations that interact with servo's style engine
 mod stylo;
 mod stylo_device;
@@ -103,7 +105,9 @@ pub use markup5ever::{
     namespace_prefix, namespace_url, ns,
 };
 pub use mutator::DocumentMutator;
-pub use node::{Attribute, DocumentData, ElementData, FormControlState, Node, NodeData, TextNodeData};
+pub use node::{
+    Attribute, DocumentData, ElementData, FormControlState, Node, NodeData, TextNodeData,
+};
 pub use parley::FontContext;
 pub use scrolling::{ScrollBehavior, ScrollLogicalPosition};
 pub use selectors::matching::QuirksMode as StyleQuirksMode;

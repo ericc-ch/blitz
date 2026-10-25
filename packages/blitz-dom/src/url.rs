@@ -16,6 +16,13 @@ impl DocumentUrl {
         UrlExtraData(ServoArc::clone(&self.base_url))
     }
 
+    /// The base URL as a shared value, for document state that lives outside
+    /// this struct — the node tree keeps a copy so a presentational hint can
+    /// resolve a URL without reaching the document.
+    pub(crate) fn shared(&self) -> ServoArc<Url> {
+        ServoArc::clone(&self.base_url)
+    }
+
     pub(crate) fn resolve_relative(&self, raw: &str) -> Option<url::Url> {
         self.base_url.join(raw).ok()
     }
