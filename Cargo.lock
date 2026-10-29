@@ -943,6 +943,7 @@ dependencies = [
  "web-time",
  "writeable",
  "wuff",
+ "xml5ever",
 ]
 
 [[package]]
@@ -10516,9 +10517,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xml5ever"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73290529dc9bc6c6155bf77fdd70ce0061f98ad387586aa3104cddab29206961"
+version = "0.40.1"
 dependencies = [
  "log",
  "markup5ever",
