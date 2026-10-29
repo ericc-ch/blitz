@@ -9,10 +9,17 @@
 //!
 //! Parsing follows that grammar strictly: a duplicate name, `<` in a value, a
 //! malformed reference, or a code point XML excludes is a parse error and the
-//! whole map is empty. The map is derived from the data on demand, so no write
-//! to the data can leave it stale.
+//! whole map is empty.
+//!
+//! The list lives on the processing instruction. Creation and every data write
+//! derive it with this parser; a DOM attribute mutation serializes the list
+//! into the data and keeps the list itself, because a DOM attribute name (an
+//! attribute local name such as `$`) need not match the XML `Name` production
+//! (<https://dom.spec.whatwg.org/#update-data-from-attributes>). The two can
+//! therefore differ after such a mutation; a later data write replaces the
+//! list with what the data parses to.
 
-use xml5ever::names::{is_char, is_name, is_name_char, is_name_start_char, is_space};
+use xml5ever::names::{is_char, is_name_char, is_name_start_char, is_space};
 
 /// Parses `data` into an ordered attribute list.
 ///
@@ -87,9 +94,6 @@ fn parse_name(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<St
     {
         name.push(chars.next()?);
     }
-    if !is_name(&name) {
-        return None;
-    }
     Some(name)
 }
 
@@ -111,41 +115,64 @@ fn parse_value(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<S
 }
 
 fn parse_reference(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
-    let mut token = String::new();
+    let first = chars.next()?;
+    if first == '#' {
+        return parse_character_reference(chars);
+    }
+    if !first.is_ascii_alphanumeric() {
+        return None;
+    }
+    let mut name = String::new();
+    name.push(first);
     loop {
         match chars.next()? {
             ';' => break,
-            character
-                if token.len() < 16 && (character.is_ascii_alphanumeric() || character == '#') =>
-            {
-                token.push(character);
+            character if name.len() < 16 && character.is_ascii_alphanumeric() => {
+                name.push(character);
             }
             _ => return None,
         }
     }
-    let character = match token.as_str() {
-        "amp" => '&',
-        "lt" => '<',
-        "gt" => '>',
-        "quot" => '"',
-        "apos" => '\'',
-        other => {
-            let code = if let Some(hex) = other
-                .strip_prefix("#x")
-                .or_else(|| other.strip_prefix("#X"))
-            {
-                u32::from_str_radix(hex, 16).ok()?
-            } else {
-                let digits = other.strip_prefix('#')?;
-                if digits.is_empty() || !digits.chars().all(|digit| digit.is_ascii_digit()) {
-                    return None;
-                }
-                digits.parse().ok()?
-            };
-            char::from_u32(code).filter(|&character| is_char(character))?
+    match name.as_str() {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => None,
+    }
+}
+
+/// A `&#...;` or `&#x...;` reference. The digit run has no length limit: XML
+/// allows any number of leading zeros, and stopping at a fixed width would
+/// turn a valid reference into a parse error that empties the whole map
+/// (<https://www.w3.org/TR/xml/#NT-CharRef>). Saturating arithmetic makes an
+/// over-long run fall out at the `Char` limit instead of wrapping.
+fn parse_character_reference(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+    let hex = chars.peek() == Some(&'x');
+    if hex {
+        chars.next();
+    }
+    let radix = if hex { 16 } else { 10 };
+    let mut value: u32 = 0;
+    let mut digits = 0usize;
+    loop {
+        match chars.next()? {
+            ';' => break,
+            character => {
+                let digit = character.to_digit(radix)?;
+                value = value.saturating_mul(radix).saturating_add(digit);
+                digits += 1;
+            }
         }
-    };
-    Some(character)
+        if value > 0x10FFFF {
+            return None;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    char::from_u32(value).filter(|&character| is_char(character))
 }
 
 fn skip_space(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -188,6 +215,21 @@ mod tests {
         assert_eq!(parse("href=\"\u{1}\""), None);
         // Form feed is not XML whitespace.
         assert_eq!(parse("href=\"a.css\"\u{C}type=\"text/css\""), None);
+        // Only the lowercase `x` introduces a hex reference.
+        assert_eq!(parse(r#"href="&#X41;""#), None);
+        assert_eq!(parse(r#"href="&#0;""#), None);
+    }
+
+    #[test]
+    fn character_references_allow_leading_zeros() {
+        assert_eq!(
+            parse(r#"href="&#00000000000000065;""#),
+            Some(vec![("href".to_owned(), "A".to_owned())])
+        );
+        assert_eq!(
+            parse(r#"href="&#x00041;""#),
+            Some(vec![("href".to_owned(), "A".to_owned())])
+        );
     }
 
     #[test]

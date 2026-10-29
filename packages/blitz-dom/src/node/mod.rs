@@ -19,8 +19,8 @@ pub use custom_widget::{
 };
 pub(crate) use element::parse_classes;
 pub use element::{
-    CanvasData, DocumentData, ElementData, FormControlState, ImageData, ImageResourceData,
-    LayoutData, ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData,
+    CanvasData, Dirtiness, DocumentData, ElementData, FormControlState, ImageData,
+    ImageResourceData, LayoutData, ListItemLayout, ListItemLayoutPosition, Marker, RasterImageData,
     SpecialElementData, SpecialElementType, Status,
 };
 pub use node::*;

@@ -5,7 +5,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::layout::damage::ALL_DAMAGE;
 use crate::net::{ImageHandler, ResourceHandler, StylesheetHandler};
-use crate::node::{CanvasData, NodeFlags, SpecialElementData};
+use crate::node::{CanvasData, Dirtiness, NodeFlags, SpecialElementData};
 use crate::stylo_device::DeviceChanges;
 use crate::util::ImageType;
 use crate::{
@@ -192,11 +192,36 @@ impl DocumentMutator<'_> {
         *attributes = crate::pseudo_attributes::parse(data).unwrap_or_default();
     }
 
-    /// Replaces a processing instruction's pseudo-attributes without
-    /// re-parsing its data. A DOM attribute mutation serializes the map into
-    /// the data itself, and a name the XML grammar rejects (an attribute
-    /// local name such as `$`) would otherwise be lost
+    /// Replaces a processing instruction's data and pseudo-attributes in one
+    /// step. A DOM attribute mutation serializes the map into the data itself,
+    /// and a name the XML grammar rejects (an attribute local name such as
+    /// `$`) would otherwise be lost; one step leaves no window where the two
+    /// disagree
     /// (<https://dom.spec.whatwg.org/#update-data-from-attributes>).
+    pub fn replace_processing_instruction(
+        &mut self,
+        node_id: NodeId,
+        data: &str,
+        attributes: Vec<(String, String)>,
+    ) {
+        let Some(node) = self.doc.nodes.get_mut(node_id) else {
+            return;
+        };
+        let NodeData::ProcessingInstruction {
+            contents,
+            attributes: stored,
+            ..
+        } = &mut node.data
+        else {
+            return;
+        };
+        contents.clear();
+        contents.push_str(data);
+        *stored = attributes;
+    }
+
+    /// Replaces a processing instruction's pseudo-attributes without
+    /// changing its data.
     pub fn set_processing_instruction_attributes(
         &mut self,
         node_id: NodeId,
@@ -529,9 +554,9 @@ impl DocumentMutator<'_> {
         // whether or not the node is in a document: `new Image()` and a
         // detached option both read them before insertion.
         if checked_attribute && !element.form_state.dirty_checkedness {
-            element.store_checkedness(true, false);
+            element.store_checkedness(true, Dirtiness::Keep);
         } else if selected_attribute && !element.form_state.dirty_selectedness {
-            element.store_selectedness(true, false);
+            element.store_selectedness(true, Dirtiness::Keep);
         }
 
         if *attr == local_name!("style") {
@@ -691,11 +716,11 @@ impl DocumentMutator<'_> {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         } else if (tag, attr) == tag_and_attr!("input", "checked") {
             if !element.form_state.dirty_checkedness {
-                element.store_checkedness(false, false);
+                element.store_checkedness(false, Dirtiness::Keep);
             }
         } else if (tag, attr) == tag_and_attr!("option", "selected") {
             if !element.form_state.dirty_selectedness {
-                element.store_selectedness(false, false);
+                element.store_selectedness(false, Dirtiness::Keep);
             }
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.recompute_is_animating = true;
@@ -707,14 +732,15 @@ impl DocumentMutator<'_> {
         }
     }
 
-    /// Stores the current value and its dirty value flag, and refreshes
-    /// `:placeholder-shown`. The content attribute stays the default value
+    /// Stores the current value and applies `dirtiness` to the dirty value
+    /// flag, then refreshes `:placeholder-shown`. The content attribute stays
+    /// the default value
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
-    pub fn set_value(&mut self, node_id: NodeId, value: String, dirty: bool) {
+    pub fn set_value(&mut self, node_id: NodeId, value: String, dirtiness: Dirtiness) {
         self.doc
             .snapshot_node_and(node_id, ElementState::PLACEHOLDER_SHOWN, |node| {
                 if let Some(element) = node.element_data_mut() {
-                    element.store_value(value.clone(), dirty);
+                    element.store_value(value.clone(), dirtiness);
                 }
             });
         // Once layout builds an editor it is the live value, so the text must
@@ -733,38 +759,28 @@ impl DocumentMutator<'_> {
         }
     }
 
-    /// Sets checkedness without writing the `checked` attribute. `dirty`
-    /// marks it script-set; activation passes false
+    /// Sets checkedness without writing the `checked` attribute, and applies
+    /// `dirtiness` to the dirty checkedness flag
     /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-checked>).
-    pub fn set_checkedness(&mut self, node_id: NodeId, checked: bool, dirty: bool) {
+    pub fn set_checkedness(&mut self, node_id: NodeId, checked: bool, dirtiness: Dirtiness) {
         self.doc
             .snapshot_node_and(node_id, ElementState::CHECKED, |node| {
                 if let Some(element) = node.element_data_mut() {
-                    element.store_checkedness(checked, dirty);
+                    element.store_checkedness(checked, dirtiness);
                 }
             });
     }
 
-    /// Sets selectedness without writing the `selected` attribute. `dirty`
-    /// marks it script-set; the selectedness setting algorithm and the
-    /// `Option()` constructor pass false
+    /// Sets selectedness without writing the `selected` attribute, and
+    /// applies `dirtiness` to the option dirtiness flag
     /// (<https://html.spec.whatwg.org/multipage/form-elements.html#dom-option-selected>).
-    pub fn set_selectedness(&mut self, node_id: NodeId, selected: bool, dirty: bool) {
+    pub fn set_selectedness(&mut self, node_id: NodeId, selected: bool, dirtiness: Dirtiness) {
         self.doc
             .snapshot_node_and(node_id, ElementState::CHECKED, |node| {
                 if let Some(element) = node.element_data_mut() {
-                    element.store_selectedness(selected, dirty);
+                    element.store_selectedness(selected, dirtiness);
                 }
             });
-    }
-
-    /// Clears an option's selectedness dirtiness so its `selected` attribute
-    /// drives the slot again
-    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element>).
-    pub fn clear_selectedness_dirtiness(&mut self, node_id: NodeId) {
-        if let Some(element) = self.doc.nodes[node_id].element_data_mut() {
-            element.clear_selectedness_dirtiness();
-        }
     }
 
     /// Sets the indeterminate flag

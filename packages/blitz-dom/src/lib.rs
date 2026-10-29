@@ -109,7 +109,7 @@ pub use markup5ever::{
 };
 pub use mutator::DocumentMutator;
 pub use node::{
-    Attribute, DocumentData, ElementData, FormControlState, Node, NodeData, TextNodeData,
+    Attribute, Dirtiness, DocumentData, ElementData, FormControlState, Node, NodeData, TextNodeData,
 };
 pub use parley::FontContext;
 pub use scrolling::{ScrollBehavior, ScrollLogicalPosition};
