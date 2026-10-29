@@ -165,7 +165,9 @@ fn write_node(out: &mut String, doc: &blitz_dom::BaseDocument, node: &Node, dept
         NodeData::Doctype { name, .. } => {
             writeln!(out, "<!DOCTYPE {name}>").unwrap();
         }
-        NodeData::ProcessingInstruction { target, contents } => {
+        NodeData::ProcessingInstruction {
+            target, contents, ..
+        } => {
             writeln!(out, "<?{target} {:?}>", truncate(contents.trim(), 60)).unwrap();
         }
         NodeData::CDataSection { contents } => {

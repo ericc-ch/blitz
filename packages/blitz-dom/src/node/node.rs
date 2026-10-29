@@ -917,6 +917,12 @@ pub enum NodeData {
         target: String,
         /// The PI data (contents).
         contents: String,
+        /// The pseudo-attributes parsed from `contents`. A DOM attribute
+        /// mutation keeps them and rewrites `contents`; a data write
+        /// re-derives them, so the style-sheet loader and the attribute
+        /// accessors read one list
+        /// (<https://www.w3.org/TR/xml-stylesheet/#dt-parsing>).
+        attributes: Vec<(String, String)>,
     },
 
     /// A CDATA section. Like text it holds character data, but it is its

@@ -167,7 +167,51 @@ impl DocumentMutator<'_> {
         self.doc.create_node(NodeData::ProcessingInstruction {
             target: target.to_string(),
             contents: contents.to_string(),
+            attributes: crate::pseudo_attributes::parse(contents).unwrap_or_default(),
         })
+    }
+
+    /// Replaces a processing instruction's data and re-derives its
+    /// pseudo-attributes. A parse error leaves them empty, so the attribute
+    /// accessors and the style-sheet loader see the same map
+    /// (<https://www.w3.org/TR/xml-stylesheet/#dt-parsing>).
+    pub fn set_processing_instruction_data(&mut self, node_id: NodeId, data: &str) {
+        let Some(node) = self.doc.nodes.get_mut(node_id) else {
+            return;
+        };
+        let NodeData::ProcessingInstruction {
+            contents,
+            attributes,
+            ..
+        } = &mut node.data
+        else {
+            return;
+        };
+        contents.clear();
+        contents.push_str(data);
+        *attributes = crate::pseudo_attributes::parse(data).unwrap_or_default();
+    }
+
+    /// Replaces a processing instruction's pseudo-attributes without
+    /// re-parsing its data. A DOM attribute mutation serializes the map into
+    /// the data itself, and a name the XML grammar rejects (an attribute
+    /// local name such as `$`) would otherwise be lost
+    /// (<https://dom.spec.whatwg.org/#update-data-from-attributes>).
+    pub fn set_processing_instruction_attributes(
+        &mut self,
+        node_id: NodeId,
+        attributes: Vec<(String, String)>,
+    ) {
+        let Some(node) = self.doc.nodes.get_mut(node_id) else {
+            return;
+        };
+        let NodeData::ProcessingInstruction {
+            attributes: stored, ..
+        } = &mut node.data
+        else {
+            return;
+        };
+        *stored = attributes;
     }
 
     pub fn create_cdata_section_node(&mut self, contents: &str) -> NodeId {
@@ -1572,24 +1616,24 @@ impl<'doc> DocumentMutator<'doc> {
     /// are XML, so `&amp;` in an `href` is the character, not five bytes of
     /// URL.
     fn load_pi_stylesheet(&mut self, node_id: NodeId) {
-        let Some((target, contents)) = self.doc.nodes.get(node_id).and_then(|node| {
-            let NodeData::ProcessingInstruction { target, contents } = &node.data else {
+        let Some((target, attributes)) = self.doc.nodes.get(node_id).and_then(|node| {
+            let NodeData::ProcessingInstruction {
+                target, attributes, ..
+            } = &node.data
+            else {
                 return None;
             };
-            Some((target.clone(), contents.clone()))
+            Some((target.clone(), attributes.clone()))
         }) else {
             return;
         };
         if !target.eq_ignore_ascii_case("xml-stylesheet") {
             return;
         }
-        // A parse error leaves the DOM's pseudo-attribute map empty, so a
-        // lenient read here would style a page whose script sees no
-        // attributes. Load nothing in that case
+        // The attribute list is the one the DOM exposes, so a parse error
+        // (empty list) loads nothing and a mutation cannot make the page see
+        // fewer attributes than the loader used
         // (<https://www.w3.org/TR/xml-stylesheet/#dt-parsing>).
-        let Some(attributes) = crate::pseudo_attributes::parse(&contents) else {
-            return;
-        };
         let value = |name: &str| {
             attributes
                 .iter()

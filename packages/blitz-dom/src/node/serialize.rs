@@ -151,7 +151,9 @@ impl Node {
                 }
                 writer.push('>');
             }
-            NodeData::ProcessingInstruction { target, contents } => {
+            NodeData::ProcessingInstruction {
+                target, contents, ..
+            } => {
                 writer.push_str("<?");
                 writer.push_str(target);
                 if !contents.is_empty() {
