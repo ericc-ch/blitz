@@ -1560,7 +1560,13 @@ impl<'doc> DocumentMutator<'doc> {
         if !target.eq_ignore_ascii_case("xml-stylesheet") {
             return;
         }
-        let attributes = pi_pseudo_attributes(&contents);
+        // A parse error leaves the DOM's pseudo-attribute map empty, so a
+        // lenient read here would style a page whose script sees no
+        // attributes. Load nothing in that case
+        // (<https://www.w3.org/TR/xml-stylesheet/#dt-parsing>).
+        let Some(attributes) = crate::pseudo_attributes::parse(&contents) else {
+            return;
+        };
         let value = |name: &str| {
             attributes
                 .iter()
@@ -1831,82 +1837,6 @@ impl Drop for ViewportMut<'_> {
         let changes = DeviceChanges::from_viewports(&self.initial_viewport, &self.doc.viewport);
         self.doc.queue_device_changes(changes);
     }
-}
-
-/// The pseudo-attributes of one `xml-stylesheet` processing instruction:
-/// `name = "value"` pairs, single or double quoted, separated by whitespace
-/// (<https://www.w3.org/TR/xml-stylesheet/#dt-pseudo-attribute>).
-fn pi_pseudo_attributes(contents: &str) -> Vec<(String, String)> {
-    let mut attributes = Vec::new();
-    let mut rest = contents;
-    loop {
-        rest = rest.trim_start();
-        if rest.is_empty() {
-            break;
-        }
-        let Some(name_end) = rest.find(|c: char| c.is_ascii_whitespace() || c == '=') else {
-            break;
-        };
-        let name = &rest[..name_end];
-        rest = rest[name_end..].trim_start();
-        let Some(after_eq) = rest.strip_prefix('=') else {
-            // Not a pseudo-attribute; `name` was consumed, so the scan moves on.
-            continue;
-        };
-        rest = after_eq.trim_start();
-        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            continue;
-        };
-        rest = &rest[quote.len_utf8()..];
-        let Some(end) = rest.find(quote) else {
-            break;
-        };
-        attributes.push((name.to_owned(), xml_decode(&rest[..end])));
-        rest = &rest[end + quote.len_utf8()..];
-    }
-    attributes
-}
-
-/// Decodes the predefined XML entities and numeric character references in
-/// one attribute value
-/// (<https://www.w3.org/TR/xml/#sec-references>). PI data is not parsed as
-/// markup, so this is the only place those references become characters.
-fn xml_decode(value: &str) -> String {
-    let mut decoded = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(start) = rest.find('&') {
-        decoded.push_str(&rest[..start]);
-        let entity = &rest[start + 1..];
-        let Some(end) = entity.find(';') else {
-            decoded.push_str(&rest[start..]);
-            return decoded;
-        };
-        let reference = &entity[..end];
-        let character = match reference {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => reference
-                .strip_prefix("#x")
-                .or_else(|| reference.strip_prefix("#X"))
-                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| {
-                    reference
-                        .strip_prefix('#')
-                        .and_then(|dec| dec.parse::<u32>().ok())
-                })
-                .and_then(char::from_u32),
-        };
-        match character {
-            Some(character) => decoded.push(character),
-            None => decoded.push_str(&rest[start..=start + end]),
-        }
-        rest = &entity[end + 1..];
-    }
-    decoded.push_str(rest);
-    decoded
 }
 
 #[cfg(test)]

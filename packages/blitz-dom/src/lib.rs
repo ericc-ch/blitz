@@ -52,6 +52,9 @@ mod iframe;
 /// Integration of taffy and the DOM.
 mod layout;
 mod mutator;
+/// Pseudo-attributes on a processing instruction, shared by the DOM and the
+/// style-sheet loader.
+pub mod pseudo_attributes;
 mod query_selector;
 mod resolve;
 /// Computation of resolved CSS property values (`getComputedStyle()`)

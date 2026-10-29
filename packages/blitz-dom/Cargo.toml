@@ -60,6 +60,7 @@ app_units = { workspace = true }
 euclid = { workspace = true }
 atomic_refcell = { workspace = true }
 markup5ever = { workspace = true }
+xml5ever = { workspace = true }
 smallvec = { workspace = true }
 thin-vec = { workspace = true }
 

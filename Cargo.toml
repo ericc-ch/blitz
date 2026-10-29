@@ -319,6 +319,12 @@ rustc-hash = { workspace = true }
 # style_dom = { path = "../stylo/stylo_dom", package = "stylo_dom" }
 # selectors = { path = "../stylo/selectors", package = "selectors" }
 
+# blitz-dom validates the XML name and processing-instruction grammar that
+# lives in the html5ever fork's xml5ever; embedders patch the same crate, and
+# both submodules sit next to each other in third_party.
+[patch.crates-io]
+xml5ever = { path = "../html5ever/xml5ever" }
+
 # [patch.crates-io]
 # [patch."https://github.com/dioxuslabs/taffy"]
 # taffy = { path = "../taffy" }
