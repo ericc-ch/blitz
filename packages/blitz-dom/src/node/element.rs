@@ -1338,6 +1338,29 @@ mod tests {
         assert_eq!(checkbox.form_state.value(), "");
     }
 
+    #[test]
+    fn setters_apply_dirtiness_per_write() {
+        let mut control = input("checkbox", false);
+        control.store_value("first".to_owned(), Dirtiness::Set);
+        assert!(control.form_state.dirty_value());
+        control.store_value("second".to_owned(), Dirtiness::Keep);
+        assert!(control.form_state.dirty_value());
+        control.store_value("third".to_owned(), Dirtiness::Clear);
+        assert!(!control.form_state.dirty_value());
+
+        control.store_checkedness(true, Dirtiness::Set);
+        assert!(control.form_state.dirty_checkedness());
+        control.store_checkedness(false, Dirtiness::Keep);
+        assert!(control.form_state.dirty_checkedness());
+        control.store_checkedness(false, Dirtiness::Clear);
+        assert!(!control.form_state.dirty_checkedness());
+
+        control.store_selectedness(true, Dirtiness::Keep);
+        assert!(!control.form_state.dirty_selectedness());
+        control.store_selectedness(true, Dirtiness::Set);
+        assert!(control.form_state.dirty_selectedness());
+    }
+
     /// Build a [`TextInputData`] with the given text laid out at scale 1.0.
     fn make_input(is_multiline: bool, text: &str) -> TextInputData {
         let mut font_ctx = FontContext::new();
