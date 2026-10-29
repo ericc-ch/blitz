@@ -21,6 +21,9 @@
 
 use xml5ever::names::{is_char, is_name_char, is_name_start_char, is_space};
 
+/// The data being scanned, one character at a time.
+type Cursor<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
 /// Parses `data` into an ordered attribute list.
 ///
 /// `None` is a parse error: the caller uses an empty map and loads nothing
@@ -81,23 +84,20 @@ pub fn serialize(attributes: &[(String, String)]) -> String {
     data
 }
 
-fn parse_name(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+fn parse_name(chars: &mut Cursor<'_>) -> Option<String> {
     let first = chars.next()?;
     if !is_name_start_char(first) {
         return None;
     }
     let mut name = String::new();
     name.push(first);
-    while chars
-        .peek()
-        .is_some_and(|character| is_name_char(*character))
-    {
-        name.push(chars.next()?);
+    while let Some(character) = chars.next_if(|character| is_name_char(*character)) {
+        name.push(character);
     }
     Some(name)
 }
 
-fn parse_value(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+fn parse_value(chars: &mut Cursor<'_>) -> Option<String> {
     let quote = chars.next()?;
     if quote != '"' && quote != '\'' {
         return None;
@@ -114,7 +114,7 @@ fn parse_value(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<S
     }
 }
 
-fn parse_reference(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+fn parse_reference(chars: &mut Cursor<'_>) -> Option<char> {
     let first = chars.next()?;
     if first == '#' {
         return parse_character_reference(chars);
@@ -127,7 +127,8 @@ fn parse_reference(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Opti
     loop {
         match chars.next()? {
             ';' => break,
-            character if name.len() < 16 && character.is_ascii_alphanumeric() => {
+            // The longest predefined name is `quot` or `apos`, four bytes.
+            character if character.is_ascii_alphanumeric() && name.len() < 4 => {
                 name.push(character);
             }
             _ => return None,
@@ -146,42 +147,41 @@ fn parse_reference(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Opti
 /// A `&#...;` or `&#x...;` reference. The digit run has no length limit: XML
 /// allows any number of leading zeros, and stopping at a fixed width would
 /// turn a valid reference into a parse error that empties the whole map
-/// (<https://www.w3.org/TR/xml/#NT-CharRef>). Saturating arithmetic makes an
-/// over-long run fall out at the `Char` limit instead of wrapping.
-fn parse_character_reference(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+/// (<https://www.w3.org/TR/xml/#NT-CharRef>). The value is checked against
+/// the `Char` limit after every digit, so a longer run cannot overflow.
+fn parse_character_reference(chars: &mut Cursor<'_>) -> Option<char> {
     let hex = chars.peek() == Some(&'x');
     if hex {
         chars.next();
     }
     let radix = if hex { 16 } else { 10 };
     let mut value: u32 = 0;
-    let mut digits = 0usize;
+    let mut digit_seen = false;
     loop {
         match chars.next()? {
             ';' => break,
             character => {
-                let digit = character.to_digit(radix)?;
-                value = value.saturating_mul(radix).saturating_add(digit);
-                digits += 1;
+                value = value * radix + character.to_digit(radix)?;
+                digit_seen = true;
             }
         }
         if value > 0x10FFFF {
             return None;
         }
     }
-    if digits == 0 {
+    if !digit_seen {
         return None;
     }
     char::from_u32(value).filter(|&character| is_char(character))
 }
 
-fn skip_space(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+fn skip_space(chars: &mut Cursor<'_>) {
     while chars.peek().is_some_and(|character| is_space(*character)) {
         chars.next();
     }
 }
 
-fn take_space(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+fn take_space(chars: &mut Cursor<'_>) -> bool {
     if !chars.peek().is_some_and(|character| is_space(*character)) {
         return false;
     }

@@ -1,3 +1,4 @@
+use crate::Dirtiness;
 use blitz_traits::node_id::NodeId;
 use std::collections::VecDeque;
 use stylo_taffy::CopyStyleGetters;
@@ -672,7 +673,7 @@ pub(crate) fn handle_click(
                     } else if el.checkbox_input_checked().is_some() {
                         doc.snapshot_node_and(node_id, ElementState::CHECKED, |node| {
                             if let Some(el) = node.element_data_mut() {
-                                el.set_checkbox_input_checked(true);
+                                el.store_checkedness(true, Dirtiness::Set);
                             }
                             node.mark_ancestors_dirty();
                         });

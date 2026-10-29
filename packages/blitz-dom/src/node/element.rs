@@ -169,25 +169,68 @@ pub enum Dirtiness {
 /// <https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>).
 #[derive(Clone, Debug, Default)]
 pub struct FormControlState {
+    value: String,
+    dirty_value: bool,
+    checkedness: bool,
+    dirty_checkedness: bool,
+    selectedness: bool,
+    dirty_selectedness: bool,
+    indeterminate: bool,
+}
+
+impl Dirtiness {
+    fn apply(self, flag: &mut bool) {
+        match self {
+            Self::Keep => {}
+            Self::Set => *flag = true,
+            Self::Clear => *flag = false,
+        }
+    }
+}
+
+impl FormControlState {
     /// The current value
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
-    pub value: String,
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
     /// Whether the value was last set by script or a user edit
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>).
-    pub dirty_value: bool,
+    pub fn dirty_value(&self) -> bool {
+        self.dirty_value
+    }
+
     /// The current checkedness
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>).
-    pub checkedness: bool,
-    /// Whether the `checked` IDL attribute last set the checkedness
+    pub fn checkedness(&self) -> bool {
+        self.checkedness
+    }
+
+    /// Whether the `checked` IDL attribute or a user interaction last set the
+    /// checkedness
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked-dirty>).
-    pub dirty_checkedness: bool,
+    pub fn dirty_checkedness(&self) -> bool {
+        self.dirty_checkedness
+    }
+
     /// The current selectedness
     /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>).
-    pub selectedness: bool,
-    /// Whether the selectedness was last set by script
+    pub fn selectedness(&self) -> bool {
+        self.selectedness
+    }
+
+    /// Whether script last set the selectedness
     /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-dirtiness>).
-    pub dirty_selectedness: bool,
-    pub indeterminate: bool,
+    pub fn dirty_selectedness(&self) -> bool {
+        self.dirty_selectedness
+    }
+
+    /// The indeterminate IDL flag
+    /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-indeterminate>).
+    pub fn indeterminate(&self) -> bool {
+        self.indeterminate
+    }
 }
 
 /// Taffy layout output state (cache, layouts, scroll offset and overflow).
@@ -446,8 +489,9 @@ pub enum SpecialElementData {
     TableRoot(Arc<TableContext>),
     /// Parley text editor (text inputs)
     TextInput(TextInputData),
-    /// Checkbox checked state
-    CheckboxInput(bool),
+    /// A checkbox or radio input's widget. Its checked state is the control
+    /// slot, not a copy
+    CheckboxInput,
     /// Selected files
     #[cfg(feature = "file-input")]
     FileInput(FileData),
@@ -467,7 +511,7 @@ impl Clone for SpecialElementData {
             Self::Canvas(data) => Self::Canvas(data.clone()),
             Self::TableRoot(data) => Self::TableRoot(data.clone()),
             Self::TextInput(data) => Self::TextInput(data.clone()),
-            Self::CheckboxInput(data) => Self::CheckboxInput(*data),
+            Self::CheckboxInput => Self::CheckboxInput,
             #[cfg(feature = "file-input")]
             Self::FileInput(data) => Self::FileInput(data.clone()),
             Self::None => Self::None,
@@ -537,30 +581,7 @@ impl ElementData {
         // Parsers build elements with their attributes in one step instead of
         // going through `set_attribute`, so this is the only place they see
         // them.
-        if let Some(value) = data.attr(local_name!("value")) {
-            data.form_state.value = value.to_owned();
-        }
-        let checked = if data.name.local == local_name!("input") {
-            data.has_attr(local_name!("checked"))
-        } else if data.name.local == local_name!("option") {
-            data.has_attr(local_name!("selected"))
-        } else {
-            false
-        };
-        data.form_state.checkedness = data.name.local == local_name!("input") && checked;
-        data.form_state.selectedness = data.name.local == local_name!("option") && checked;
-
-        // Mirror the `checked` attribute into the element state so that
-        // `:checked` selectors can be matched (and invalidated) from
-        // `ElementState`. Inputs only match in the Checkbox and Radio Button
-        // states, while a selected `option` always does
-        // (<https://drafts.csswg.org/selectors/#checked-pseudo>,
-        // <https://html.spec.whatwg.org/multipage/input.html#attr-input-type>).
-        if data.name.local == local_name!("option") && checked
-            || data.checkedness_applies() && checked
-        {
-            data.element_state.insert(ElementState::CHECKED);
-        }
+        data.seed_from_attributes();
 
         // The element state needs to be modified if the element can be disabled.
         if data.can_be_disabled() {
@@ -635,12 +656,11 @@ impl ElementData {
         // <https://html.spec.whatwg.org/multipage/form-elements.html#the-textarea-element>).
         let empty = if let Some(input) = self.text_input_data() {
             input.editor.raw_text().is_empty()
-        } else if self.form_state.dirty_value {
-            self.form_state.value.is_empty()
         } else {
             match self.name.local.as_ref() {
+                "textarea" if self.form_state.dirty_value() => self.form_state.value().is_empty(),
                 "textarea" => fallback_value_empty,
-                "input" => self.form_state.value.is_empty(),
+                "input" => self.form_state.value().is_empty(),
                 _ => return false,
             }
         };
@@ -654,13 +674,13 @@ impl ElementData {
     /// The current checkedness
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>).
     pub fn checkedness(&self) -> bool {
-        self.form_state.checkedness
+        self.form_state.checkedness()
     }
 
     /// The current selectedness
     /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>).
     pub fn selectedness(&self) -> bool {
-        self.form_state.selectedness
+        self.form_state.selectedness()
     }
 
     /// Whether the checkedness state applies: an input in the Checkbox or
@@ -679,12 +699,8 @@ impl ElementData {
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
     pub fn store_value(&mut self, value: String, dirtiness: Dirtiness) {
         self.form_state.value = value;
-        match dirtiness {
-            Dirtiness::Keep => {}
-            Dirtiness::Set => self.form_state.dirty_value = true,
-            Dirtiness::Clear => self.form_state.dirty_value = false,
-        }
-        let empty = self.form_state.value.is_empty();
+        dirtiness.apply(&mut self.form_state.dirty_value);
+        let empty = self.form_state.value().is_empty();
         self.sync_placeholder_shown(empty);
     }
 
@@ -696,14 +712,8 @@ impl ElementData {
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked-dirty>).
     pub fn store_checkedness(&mut self, checked: bool, dirtiness: Dirtiness) {
         self.form_state.checkedness = checked;
-        match dirtiness {
-            Dirtiness::Keep => {}
-            Dirtiness::Set => self.form_state.dirty_checkedness = true,
-            Dirtiness::Clear => self.form_state.dirty_checkedness = false,
-        }
-        if self.checkedness_applies() {
-            self.set_checkbox_input_checked(checked);
-        }
+        dirtiness.apply(&mut self.form_state.dirty_checkedness);
+        self.sync_checked_state();
     }
 
     /// Stores the current selectedness and applies `dirtiness` to the option
@@ -713,12 +723,8 @@ impl ElementData {
     /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-dirtiness>).
     pub fn store_selectedness(&mut self, selected: bool, dirtiness: Dirtiness) {
         self.form_state.selectedness = selected;
-        match dirtiness {
-            Dirtiness::Keep => {}
-            Dirtiness::Set => self.form_state.dirty_selectedness = true,
-            Dirtiness::Clear => self.form_state.dirty_selectedness = false,
-        }
-        self.element_state.set(ElementState::CHECKED, selected);
+        dirtiness.apply(&mut self.form_state.dirty_selectedness);
+        self.sync_checked_state();
     }
 
     /// The indeterminate IDL flag. It is not a content attribute
@@ -729,33 +735,42 @@ impl ElementData {
             .set(ElementState::INDETERMINATE, indeterminate);
     }
 
+    /// Seeds every control slot from the element's attributes, and derives
+    /// `:checked` from them. Creation and the reset algorithm share it
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>,
+    /// <https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-form-reset-control>).
+    fn seed_from_attributes(&mut self) {
+        self.form_state = FormControlState::default();
+        if self.name.local == local_name!("input") {
+            if let Some(value) = self.attr(local_name!("value")) {
+                self.form_state.value = value.to_owned();
+            }
+            self.form_state.checkedness = self.has_attr(local_name!("checked"));
+        } else if self.name.local == local_name!("option") {
+            self.form_state.selectedness = self.has_attr(local_name!("selected"));
+        }
+        self.sync_checked_state();
+    }
+
+    /// Derives `:checked` from the slots: an option from its selectedness, an
+    /// input from its checkedness only in the Checkbox and Radio Button
+    /// states (<https://drafts.csswg.org/selectors/#checked-pseudo>,
+    /// <https://html.spec.whatwg.org/multipage/input.html#attr-input-type>).
+    pub(crate) fn sync_checked_state(&mut self) {
+        let checked = match self.name.local.as_ref() {
+            "input" => self.checkedness_applies() && self.form_state.checkedness(),
+            "option" => self.form_state.selectedness(),
+            _ => false,
+        };
+        self.element_state.set(ElementState::CHECKED, checked);
+    }
+
     /// Drops dirty flags so the content attribute and descendant text are
     /// current again
     /// (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#reset-the-form-owner>).
     pub fn reset_control_state(&mut self, textarea_text_empty: bool) {
-        self.form_state = FormControlState::default();
-        let checked = if self.name.local == local_name!("input") {
-            self.has_attr(local_name!("checked"))
-        } else if self.name.local == local_name!("option") {
-            self.has_attr(local_name!("selected"))
-        } else {
-            false
-        };
-        if self.name.local == local_name!("input") {
-            self.form_state.checkedness = checked;
-            if let Some(value) = self.attr(local_name!("value")) {
-                self.form_state.value = value.to_owned();
-            }
-        } else if self.name.local == local_name!("option") {
-            self.form_state.selectedness = checked;
-        }
-        let checked_state = self.name.local == local_name!("option") && checked
-            || self.checkedness_applies() && checked;
-        self.element_state.set(ElementState::CHECKED, checked_state);
+        self.seed_from_attributes();
         self.element_state.set(ElementState::INDETERMINATE, false);
-        if let Some(slot) = self.checkbox_input_checked_mut() {
-            *slot = checked_state;
-        }
         self.sync_placeholder_shown(textarea_text_empty);
     }
 
@@ -765,17 +780,9 @@ impl ElementData {
     /// (<https://html.spec.whatwg.org/multipage/input.html#input-element-cloning-steps>).
     pub fn adopt_cloned_state(&mut self, state: FormControlState) {
         self.form_state = state;
-        let checked = match self.name.local.as_ref() {
-            "input" => self.checkedness_applies() && self.checkedness(),
-            "option" => self.selectedness(),
-            _ => false,
-        };
-        self.element_state.set(ElementState::CHECKED, checked);
+        self.sync_checked_state();
         self.element_state
-            .set(ElementState::INDETERMINATE, self.form_state.indeterminate);
-        if let Some(slot) = self.checkbox_input_checked_mut() {
-            *slot = checked;
-        }
+            .set(ElementState::INDETERMINATE, self.form_state.indeterminate());
     }
 
     /// Placeholder applies to the text, search, url, tel, email, password,
@@ -911,28 +918,11 @@ impl ElementData {
         }
     }
 
+    /// A checkbox or radio input's checkedness, for the widget painter. The
+    /// slot is the only copy
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>).
     pub fn checkbox_input_checked(&self) -> Option<bool> {
-        match self.special_data {
-            SpecialElementData::CheckboxInput(checked) => Some(checked),
-            _ => None,
-        }
-    }
-
-    pub fn checkbox_input_checked_mut(&mut self) -> Option<&mut bool> {
-        match self.special_data {
-            SpecialElementData::CheckboxInput(ref mut checked) => Some(checked),
-            _ => None,
-        }
-    }
-
-    /// Set the checked state of a checkbox/radio input, keeping the
-    /// `ElementState::CHECKED` bit (used for `:checked` selector matching and
-    /// invalidation) in sync with the special data.
-    pub fn set_checkbox_input_checked(&mut self, checked: bool) {
-        if let Some(is_checked) = self.checkbox_input_checked_mut() {
-            *is_checked = checked;
-        }
-        self.element_state.set(ElementState::CHECKED, checked);
+        matches!(self.special_data, SpecialElementData::CheckboxInput).then(|| self.checkedness())
     }
 
     #[cfg(feature = "file-input")]
@@ -1233,7 +1223,7 @@ impl std::fmt::Debug for SpecialElementData {
             SpecialElementData::Canvas(_) => f.write_str("NodeSpecificData::Canvas"),
             SpecialElementData::TableRoot(_) => f.write_str("NodeSpecificData::TableRoot"),
             SpecialElementData::TextInput(_) => f.write_str("NodeSpecificData::TextInput"),
-            SpecialElementData::CheckboxInput(_) => f.write_str("NodeSpecificData::CheckboxInput"),
+            SpecialElementData::CheckboxInput => f.write_str("NodeSpecificData::CheckboxInput"),
             #[cfg(feature = "file-input")]
             SpecialElementData::FileInput(_) => f.write_str("NodeSpecificData::FileInput"),
             SpecialElementData::None => f.write_str("NodeSpecificData::None"),
@@ -1319,16 +1309,18 @@ mod tests {
     #[test]
     fn checkedness_follows_the_attribute_in_every_state() {
         let text = input("text", true);
-        assert!(text.form_state.checkedness);
+        assert!(text.form_state.checkedness());
         assert!(
             !text.element_state.contains(super::ElementState::CHECKED),
             "a text input never matches :checked"
         );
 
         let checkbox = input("CHECKBOX", true);
-        assert!(checkbox.form_state.checkedness);
+        assert!(checkbox.form_state.checkedness());
         assert!(
-            checkbox.element_state.contains(super::ElementState::CHECKED),
+            checkbox
+                .element_state
+                .contains(super::ElementState::CHECKED),
             "the type keyword is case-insensitive"
         );
     }
@@ -1336,30 +1328,14 @@ mod tests {
     #[test]
     fn reset_reseeds_checkedness_and_value_from_the_attributes() {
         let mut checkbox = input("checkbox", true);
-        checkbox.form_state.value = "edited".to_owned();
         checkbox.store_value("edited".to_owned(), Dirtiness::Set);
         checkbox.store_checkedness(false, Dirtiness::Set);
 
         checkbox.reset_control_state(false);
         assert!(checkbox.checkedness());
-        assert!(!checkbox.form_state.dirty_checkedness);
-        assert!(!checkbox.form_state.dirty_value);
-        assert_eq!(checkbox.form_state.value, "");
-    }
-
-    #[test]
-    fn dirtiness_is_applied_per_write() {
-        let mut control = input("checkbox", false);
-        control.store_value("first".to_owned(), Dirtiness::Set);
-        assert!(control.form_state.dirty_value);
-        control.store_value("first".to_owned(), Dirtiness::Clear);
-        assert!(!control.form_state.dirty_value);
-        control.store_value("first".to_owned(), Dirtiness::Keep);
-        assert!(!control.form_state.dirty_value);
-        control.store_checkedness(true, Dirtiness::Set);
-        assert!(control.form_state.dirty_checkedness);
-        control.store_checkedness(false, Dirtiness::Keep);
-        assert!(control.form_state.dirty_checkedness);
+        assert!(!checkbox.form_state.dirty_checkedness());
+        assert!(!checkbox.form_state.dirty_value());
+        assert_eq!(checkbox.form_state.value(), "");
     }
 
     /// Build a [`TextInputData`] with the given text laid out at scale 1.0.

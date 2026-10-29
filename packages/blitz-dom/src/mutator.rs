@@ -164,16 +164,30 @@ impl DocumentMutator<'_> {
     }
 
     pub fn create_processing_instruction_node(&mut self, target: &str, contents: &str) -> NodeId {
+        let attributes = crate::pseudo_attributes::parse(contents).unwrap_or_default();
+        self.create_processing_instruction_node_with_attributes(target, contents, attributes)
+    }
+
+    /// Creates a processing instruction with an attribute map that may not be
+    /// the one its data parses to: the DOM allows attribute names the XML
+    /// grammar rejects, and a cross-document import carries the map with the
+    /// node.
+    pub fn create_processing_instruction_node_with_attributes(
+        &mut self,
+        target: &str,
+        contents: &str,
+        attributes: Vec<(String, String)>,
+    ) -> NodeId {
         self.doc.create_node(NodeData::ProcessingInstruction {
             target: target.to_string(),
             contents: contents.to_string(),
-            attributes: crate::pseudo_attributes::parse(contents).unwrap_or_default(),
+            attributes,
         })
     }
 
     /// Replaces a processing instruction's data and re-derives its
-    /// pseudo-attributes. A parse error leaves them empty, so the attribute
-    /// accessors and the style-sheet loader see the same map
+    /// pseudo-attributes. A parse error leaves the accessors an empty map, and
+    /// the loader parses the same data itself and loads nothing
     /// (<https://www.w3.org/TR/xml-stylesheet/#dt-parsing>).
     pub fn set_processing_instruction_data(&mut self, node_id: NodeId, data: &str) {
         let Some(node) = self.doc.nodes.get_mut(node_id) else {
@@ -190,22 +204,25 @@ impl DocumentMutator<'_> {
         contents.clear();
         contents.push_str(data);
         *attributes = crate::pseudo_attributes::parse(data).unwrap_or_default();
+        self.refresh_pi_stylesheet(node_id);
     }
 
-    /// Replaces a processing instruction's data and pseudo-attributes in one
-    /// step. A DOM attribute mutation serializes the map into the data itself,
-    /// and a name the XML grammar rejects (an attribute local name such as
-    /// `$`) would otherwise be lost; one step leaves no window where the two
-    /// disagree
+    /// Replaces a processing instruction's pseudo-attributes, serializing
+    /// them into its data in the same step. A name the XML grammar rejects (an
+    /// attribute local name such as `$`) would otherwise be lost; one step
+    /// leaves no window where the two disagree
     /// (<https://dom.spec.whatwg.org/#update-data-from-attributes>).
-    pub fn replace_processing_instruction(
+    ///
+    /// Returns the serialized data it stored, so the embedder's exact-unit
+    /// bookkeeping and live ranges use the same string the tree holds.
+    pub fn set_processing_instruction_attributes(
         &mut self,
         node_id: NodeId,
-        data: &str,
         attributes: Vec<(String, String)>,
-    ) {
+    ) -> String {
+        let data = crate::pseudo_attributes::serialize(&attributes);
         let Some(node) = self.doc.nodes.get_mut(node_id) else {
-            return;
+            return data;
         };
         let NodeData::ProcessingInstruction {
             contents,
@@ -213,30 +230,38 @@ impl DocumentMutator<'_> {
             ..
         } = &mut node.data
         else {
-            return;
+            return data;
         };
         contents.clear();
-        contents.push_str(data);
+        contents.push_str(&data);
         *stored = attributes;
+        self.refresh_pi_stylesheet(node_id);
+        data
     }
 
-    /// Replaces a processing instruction's pseudo-attributes without
-    /// changing its data.
-    pub fn set_processing_instruction_attributes(
-        &mut self,
-        node_id: NodeId,
-        attributes: Vec<(String, String)>,
-    ) {
-        let Some(node) = self.doc.nodes.get_mut(node_id) else {
+    /// Reloads an `xml-stylesheet` processing instruction that is already in
+    /// the document. A data or attribute write changes what the instruction
+    /// names, and Blink and Gecko both re-check the sheet from the write
+    /// (<https://www.w3.org/TR/xml-stylesheet/>).
+    fn refresh_pi_stylesheet(&mut self, node_id: NodeId) {
+        let Some(node) = self.doc.nodes.get(node_id) else {
             return;
         };
-        let NodeData::ProcessingInstruction {
-            attributes: stored, ..
-        } = &mut node.data
-        else {
+        if !node.flags.is_in_document() {
+            return;
+        }
+        let NodeData::ProcessingInstruction { target, .. } = &node.data else {
             return;
         };
-        *stored = attributes;
+        if !target.eq_ignore_ascii_case("xml-stylesheet") {
+            return;
+        }
+        // A response for the previous data must not install a sheet the
+        // instruction no longer names; the load records only the request it
+        // starts.
+        self.doc.pi_stylesheet_requests.remove(&node_id);
+        self.unload_pi_stylesheet(node_id);
+        self.load_pi_stylesheet(node_id);
     }
 
     pub fn create_cdata_section_node(&mut self, contents: &str) -> NodeId {
@@ -528,14 +553,12 @@ impl DocumentMutator<'_> {
         }
 
         if *attr == local_name!("value") {
-            // While the dirty value flag is clear the attribute drives the
-            // value slot; a dirty value ignores the attribute
+            // A control's current value follows the attribute while its dirty
+            // value flag is clear. Other elements with a `value` attribute
+            // (`<li>`, `<button>`, `<data>`) have no current value
             // (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
-            // An embedder's sanitization rewrites the slot from the attribute
-            // through `set_value` afterwards.
-            if !element.form_state.dirty_value {
-                element.form_state.value.clear();
-                element.form_state.value.push_str(value);
+            if !element.form_state.dirty_value() && element.name.local == local_name!("input") {
+                element.store_value(value.to_owned(), Dirtiness::Keep);
                 if let Some(input_data) = element.text_input_data_mut() {
                     input_data.set_text(
                         &mut self.doc.font_ctx.lock().unwrap(),
@@ -550,12 +573,19 @@ impl DocumentMutator<'_> {
             return;
         }
 
+        // The `type` attribute decides whether an input's checkedness applies
+        // to `:checked` at all, so the selector bit follows a type change
+        // (<https://drafts.csswg.org/selectors/#checked-pseudo>).
+        if *attr == local_name!("type") && element.name.local == local_name!("input") {
+            element.sync_checked_state();
+        }
+
         // The checkedness and selectedness slots follow their attributes
-        // whether or not the node is in a document: `new Image()` and a
-        // detached option both read them before insertion.
-        if checked_attribute && !element.form_state.dirty_checkedness {
+        // whether or not the node is in a document: a detached input and a
+        // `new Option()` both read them before insertion.
+        if checked_attribute && !element.form_state.dirty_checkedness() {
             element.store_checkedness(true, Dirtiness::Keep);
-        } else if selected_attribute && !element.form_state.dirty_selectedness {
+        } else if selected_attribute && !element.form_state.dirty_selectedness() {
             element.store_selectedness(true, Dirtiness::Keep);
         }
 
@@ -689,8 +719,11 @@ impl DocumentMutator<'_> {
             element.flush_link_state();
         }
 
-        if name.local == local_name!("value") && !element.form_state.dirty_value {
-            element.form_state.value.clear();
+        if name.local == local_name!("value")
+            && !element.form_state.dirty_value()
+            && element.name.local == local_name!("input")
+        {
+            element.store_value(String::new(), Dirtiness::Keep);
             if let Some(input_data) = element.text_input_data_mut() {
                 input_data.set_text(
                     &mut self.doc.font_ctx.lock().unwrap(),
@@ -715,13 +748,15 @@ impl DocumentMutator<'_> {
             element.flush_style_attribute(&self.doc.guard, &self.doc.url.url_extra_data(), quirks);
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         } else if (tag, attr) == tag_and_attr!("input", "checked") {
-            if !element.form_state.dirty_checkedness {
+            if !element.form_state.dirty_checkedness() {
                 element.store_checkedness(false, Dirtiness::Keep);
             }
         } else if (tag, attr) == tag_and_attr!("option", "selected") {
-            if !element.form_state.dirty_selectedness {
+            if !element.form_state.dirty_selectedness() {
                 element.store_selectedness(false, Dirtiness::Keep);
             }
+        } else if (tag, attr) == tag_and_attr!("input", "type") {
+            element.sync_checked_state();
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.recompute_is_animating = true;
         } else if (tag, attr) == tag_and_attr!("link", "href") {
@@ -1442,7 +1477,7 @@ impl<'doc> DocumentMutator<'doc> {
                 }
                 SpecialElementData::TableRoot(_) => {}
                 SpecialElementData::TextInput(_) => {}
-                SpecialElementData::CheckboxInput(_) => {}
+                SpecialElementData::CheckboxInput => {}
                 #[cfg(feature = "file-input")]
                 SpecialElementData::FileInput(_) => {}
                 SpecialElementData::None => {}
@@ -1598,7 +1633,9 @@ impl<'doc> DocumentMutator<'doc> {
 
     /// Fetches the sheet at `url` for its owning node and files the response
     /// under that node. A sheet in `head` delays the document's load event.
-    fn fetch_stylesheet(&mut self, owner: NodeId, url: url::Url, critical: bool) {
+    /// Returns the request id, so a caller that can be asked for a different
+    /// sheet later can drop a response for the old one.
+    fn fetch_stylesheet(&mut self, owner: NodeId, url: url::Url, critical: bool) -> usize {
         let handler = ResourceHandler::new(
             self.doc.tx.clone(),
             self.doc.id(),
@@ -1618,6 +1655,7 @@ impl<'doc> DocumentMutator<'doc> {
                 .insert(handler.request_id());
         }
 
+        let request_id = handler.request_id();
         self.doc.net_provider.fetch(
             self.doc.id(),
             self.doc
@@ -1625,6 +1663,7 @@ impl<'doc> DocumentMutator<'doc> {
                 .kind(blitz_traits::net::RequestKind::Stylesheet),
             Box::new(handler),
         );
+        request_id
     }
 
     /// Loads the sheet an `xml-stylesheet` processing instruction names
@@ -1632,24 +1671,27 @@ impl<'doc> DocumentMutator<'doc> {
     /// are XML, so `&amp;` in an `href` is the character, not five bytes of
     /// URL.
     fn load_pi_stylesheet(&mut self, node_id: NodeId) {
-        let Some((target, attributes)) = self.doc.nodes.get(node_id).and_then(|node| {
+        let Some((target, contents)) = self.doc.nodes.get(node_id).and_then(|node| {
             let NodeData::ProcessingInstruction {
-                target, attributes, ..
+                target, contents, ..
             } = &node.data
             else {
                 return None;
             };
-            Some((target.clone(), attributes.clone()))
+            Some((target.clone(), contents.clone()))
         }) else {
             return;
         };
         if !target.eq_ignore_ascii_case("xml-stylesheet") {
             return;
         }
-        // The attribute list is the one the DOM exposes, so a parse error
-        // (empty list) loads nothing and a mutation cannot make the page see
-        // fewer attributes than the loader used
+        // The loader parses the data itself, as Blink's data-change path does:
+        // the DOM's attribute map may hold a name the XML grammar rejects, and
+        // a data that does not parse must load nothing
         // (<https://www.w3.org/TR/xml-stylesheet/#dt-parsing>).
+        let Some(attributes) = crate::pseudo_attributes::parse(&contents) else {
+            return;
+        };
         let value = |name: &str| {
             attributes
                 .iter()
@@ -1668,7 +1710,8 @@ impl<'doc> DocumentMutator<'doc> {
         let Some(url) = self.doc.resolve_url(href) else {
             return;
         };
-        self.fetch_stylesheet(node_id, url, false);
+        let request_id = self.fetch_stylesheet(node_id, url, false);
+        self.doc.pi_stylesheet_requests.insert(node_id, request_id);
     }
 
     fn unload_stylesheet(&mut self, node_id: NodeId) {
@@ -1699,6 +1742,7 @@ impl<'doc> DocumentMutator<'doc> {
     /// special data, so the owner map and the stylist are updated directly
     /// (<https://www.w3.org/TR/xml-stylesheet/>).
     fn unload_pi_stylesheet(&mut self, node_id: NodeId) {
+        self.doc.pi_stylesheet_requests.remove(&node_id);
         let Some(stylesheet) = self.doc.nodes_to_stylesheet.remove(&node_id) else {
             return;
         };

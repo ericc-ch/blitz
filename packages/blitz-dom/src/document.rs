@@ -1,3 +1,4 @@
+use crate::Dirtiness;
 use crate::NodeTree;
 use crate::events::{DragMode, handle_dom_event};
 use crate::layout::construct::ConstructionTask;
@@ -359,6 +360,10 @@ pub struct BaseDocument {
     pub(crate) next_cssom_sheet: u64,
     /// Map from form control node ID's to their associated forms node ID's
     pub(crate) controls_to_form: HashMap<NodeId, NodeId>,
+    /// The `xml-stylesheet` request each processing instruction last started.
+    /// A response for an older request must not install a sheet the
+    /// instruction no longer names.
+    pub(crate) pi_stylesheet_requests: HashMap<NodeId, usize>,
     /// Nodes that contain sub documents
     pub(crate) sub_document_nodes: HashSet<NodeId>,
     /// Load state (abort controller and in-flight request id) for each
@@ -614,6 +619,7 @@ impl BaseDocument {
             pending_critical_resources: HashSet::new(),
             parse_errors: Vec::new(),
             controls_to_form: HashMap::new(),
+            pi_stylesheet_requests: HashMap::new(),
             net_provider,
             navigation_provider,
             shell_provider,
@@ -794,7 +800,10 @@ impl BaseDocument {
             return false;
         };
         let checked = !is_checked;
-        el.set_checkbox_input_checked(checked);
+        // A user interaction sets the dirty checkedness flag, so a later
+        // `checked` attribute write cannot undo the click
+        // (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked-dirty>).
+        el.store_checkedness(checked, Dirtiness::Set);
 
         checked
     }
@@ -813,9 +822,17 @@ impl BaseDocument {
 
         for i in radio_ids {
             let checked = i == target_radio_id;
+            // Only the radio the user actuated gets dirty; clearing its group
+            // members is an algorithm step
+            // (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked-dirty>).
+            let dirtiness = if checked {
+                Dirtiness::Set
+            } else {
+                Dirtiness::Keep
+            };
             self.snapshot_node_and(i, ElementState::CHECKED, |node| {
                 if let Some(el) = node.element_data_mut() {
-                    el.set_checkbox_input_checked(checked);
+                    el.store_checkedness(checked, dirtiness);
                 }
                 node.mark_ancestors_dirty();
             });
@@ -1715,6 +1732,17 @@ impl BaseDocument {
         match resource {
             Resource::Css(css) => {
                 let node_id = res.node_id.unwrap();
+                // A processing instruction accepts only the response of the
+                // load its current data started. No entry means the data
+                // stopped naming a sheet, so a late response installs nothing.
+                if self
+                    .nodes
+                    .get(node_id)
+                    .is_some_and(|node| matches!(node.data, NodeData::ProcessingInstruction { .. }))
+                    && self.pi_stylesheet_requests.get(&node_id) != Some(&res.request_id)
+                {
+                    return;
+                }
                 self.record_sheet_images(&css.0, res.resolved_url.as_deref());
                 self.add_stylesheet_for_node(css, node_id);
                 let clean = res
