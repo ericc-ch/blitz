@@ -113,11 +113,22 @@ impl<T: Send + Sync + 'static> ResourceHandler<T> {
         self.request_id
     }
 
-    fn respond(&self, resolved_url: String, result: Result<Resource, String>) {
+    /// Hands one resource result to the document. `resolved_url` is the URL
+    /// the bytes came from, which a redirect can change; an image instead
+    /// names the key it was filed under, because the key also carries the
+    /// element's CORS state
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
+    fn respond(
+        &self,
+        resolved_url: Option<String>,
+        image_key: Option<crate::document::ImageKey>,
+        result: Result<Resource, String>,
+    ) {
         let response = ResourceLoadResponse {
             request_id: self.request_id,
             node_id: self.node_id,
-            resolved_url: Some(resolved_url),
+            resolved_url,
+            image_key,
             result,
         };
         let _ = self.tx.send(DocumentEvent::ResourceLoad(response));
@@ -130,6 +141,8 @@ pub struct ResourceLoadResponse {
     pub request_id: usize,
     pub node_id: Option<NodeId>,
     pub resolved_url: Option<String>,
+    /// The `(url, crossorigin)` key an image request was filed under.
+    pub image_key: Option<crate::document::ImageKey>,
     pub result: Result<Resource, String>,
 }
 
@@ -143,7 +156,7 @@ pub struct StylesheetHandler {
 impl NetHandler for ResourceHandler<StylesheetHandler> {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let Ok(css) = std::str::from_utf8(&bytes) else {
-            return self.respond(resolved_url, Err(String::from("Invalid UTF8")));
+            return self.respond(Some(resolved_url), None, Err(String::from("Invalid UTF8")));
         };
 
         // NOTE(Nico): I don't *think* external stylesheets should have HTML entities escaped
@@ -170,7 +183,8 @@ impl NetHandler for ResourceHandler<StylesheetHandler> {
         );
 
         self.respond(
-            resolved_url,
+            Some(resolved_url),
+            None,
             Ok(Resource::Css(DocumentStyleSheet(ServoArc::new(sheet)))),
         );
     }
@@ -267,7 +281,7 @@ struct NestedStylesheetHandler {
 impl NetHandler for ResourceHandler<NestedStylesheetHandler> {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let Ok(css) = std::str::from_utf8(&bytes) else {
-            return self.respond(resolved_url, Err(String::from("Invalid UTF8")));
+            return self.respond(Some(resolved_url), None, Err(String::from("Invalid UTF8")));
         };
 
         // NOTE(Nico): I don't *think* external stylesheets should have HTML entities escaped
@@ -305,7 +319,11 @@ impl NetHandler for ResourceHandler<NestedStylesheetHandler> {
         );
 
         let import_rule = self.data.import_rule.clone();
-        self.respond(resolved_url, Ok(Resource::ImportedCss(import_rule, sheet)))
+        self.respond(
+            Some(resolved_url),
+            None,
+            Ok(Resource::ImportedCss(import_rule, sheet)),
+        )
     }
 }
 
@@ -316,7 +334,7 @@ struct FontFaceHandler {
 impl NetHandler for ResourceHandler<FontFaceHandler> {
     fn bytes(mut self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let result = self.data.parse(bytes);
-        self.respond(resolved_url, result)
+        self.respond(Some(resolved_url), None, result)
     }
 }
 impl FontFaceHandler {
@@ -568,27 +586,27 @@ pub(crate) struct DocumentSrcHandler;
 impl NetHandler for ResourceHandler<DocumentSrcHandler> {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let html = String::from_utf8_lossy(&bytes).into_owned();
-        self.respond(resolved_url, Ok(Resource::DocumentSrc(html)));
+        self.respond(Some(resolved_url), None, Ok(Resource::DocumentSrc(html)));
     }
 }
 
 pub struct ImageHandler {
     kind: ImageType,
-    /// The URL the request went out under, which `pending_images` is keyed
+    /// The key the request was filed under, which `pending_images` is keyed
     /// by. The provider hands back the post-redirect URL, so applying the
     /// decoded image under it would never match the request.
-    source_url: String,
+    key: crate::document::ImageKey,
 }
 impl ImageHandler {
-    pub fn new(kind: ImageType, source_url: String) -> Self {
-        Self { kind, source_url }
+    pub fn new(kind: ImageType, key: crate::document::ImageKey) -> Self {
+        Self { kind, key }
     }
 }
 
 impl NetHandler for ResourceHandler<ImageHandler> {
     fn bytes(self: Box<Self>, _resolved_url: String, bytes: Bytes) {
         let result = self.data.parse(bytes);
-        self.respond(self.data.source_url.clone(), result)
+        self.respond(None, Some(self.data.key.clone()), result)
     }
 }
 

@@ -100,7 +100,8 @@ pub use blitz_traits::node_id::NodeId;
 // `Node::final_layout`)
 pub use config::{DocumentConfig, StyleThreading};
 pub use document::{
-    BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document, FocusSource, PlainDocument,
+    BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document, FocusSource, ImageKey,
+    ImageOutcome, ImageRequestState, ImageSettleObserver, ImageSettlement, PlainDocument,
     UserAgentStylesheet,
 };
 pub use markup5ever::{

@@ -1203,6 +1203,19 @@ impl Node {
         Some(&attr.value)
     }
 
+    /// The element's `crossorigin` CORS settings state, or `None` for a
+    /// non-element or an absent attribute
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
+    pub fn cors_setting(&self) -> Option<blitz_traits::net::CorsSetting> {
+        self.element_data()?.cors_setting()
+    }
+
+    /// The element's raw `referrerpolicy` value
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
+    pub fn referrer_policy_attribute(&self) -> Option<String> {
+        self.element_data()?.referrer_policy_attribute()
+    }
+
     pub fn primary_styles(&self) -> Option<impl Deref<Target = ServoArc<ComputedValues>>> {
         self.try_stylo_element_data()
             .and_then(|stylo| stylo.primary_styles())

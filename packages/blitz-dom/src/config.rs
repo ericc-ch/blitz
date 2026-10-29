@@ -67,6 +67,10 @@ pub struct DocumentConfig {
     /// How deeply this document is nested within other documents
     /// (0 for a root document). Used to limit `<iframe>` nesting depth.
     pub subdocument_depth: usize,
+    /// Receives one settlement per image request a node's pixels come from,
+    /// so an embedder keys its per-element image state off Blitz's request
+    /// identity instead of recomputing it.
+    pub image_settle: Option<Arc<dyn crate::document::ImageSettleObserver>>,
     /// When set, the document starts in this mode and the HTML parser cannot
     /// override it. Layout and author stylesheets then follow the caller's
     /// doctype sniff instead of html5ever's
@@ -84,6 +88,7 @@ impl Default for DocumentConfig {
             navigation_provider: None,
             shell_provider: None,
             html_parser_provider: None,
+            image_settle: None,
             font_ctx: None,
             media_type: None,
             style_threading: StyleThreading::default(),

@@ -383,12 +383,23 @@ pub struct BaseDocument {
 
     /// Cache of loaded images, keyed by URL. Allows reusing images across multiple
     /// elements without re-fetching from the network.
-    pub(crate) image_cache: HashMap<String, ImageData>,
+    /// Decoded images, by request URL and CORS settings state. Two elements on
+    /// one URL with different `crossorigin` values are different requests.
+    pub(crate) image_cache:
+        HashMap<String, HashMap<Option<blitz_traits::net::CorsSetting>, ImageData>>,
 
     /// Tracks in-flight image requests. When an image is being fetched, additional
     /// requests for the same URL are queued here instead of starting new fetches.
     /// Value is a list of (node_id, image_type) pairs waiting for the image.
-    pub(crate) pending_images: HashMap<String, Vec<(NodeId, ImageType)>>,
+    /// In-flight image requests, keyed like [`BaseDocument::image_cache`].
+    pub(crate) pending_images:
+        HashMap<String, HashMap<Option<blitz_traits::net::CorsSetting>, Vec<(NodeId, ImageType)>>>,
+    /// The request each node's image data belongs to, and the referrer policy
+    /// it was created with. A new request compares against this to tell an
+    /// attribute write that changes the request from one that does not, and
+    /// the embedder reads it to key its own per-node state
+    /// (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
+    pub(crate) image_requests: HashMap<NodeId, ImageRequestState>,
 
     /// Nodes whose `background-image`/`mask-image` layers need flushing to
     /// dedicated storage on the node because their style changed (populated by
@@ -424,6 +435,7 @@ pub struct BaseDocument {
     pub navigation_provider: Arc<dyn NavigationProvider>,
     /// Shell provider. Can be used to request a redraw or set the cursor icon
     pub shell_provider: Arc<dyn ShellProvider>,
+    image_settle: Option<Arc<dyn ImageSettleObserver>>,
     /// HTML parser provider. Used to parse HTML for setInnerHTML
     pub html_parser_provider: Arc<dyn HtmlParserProvider>,
     /// Carried on every sub-resource `Request` this document issues; aborting
@@ -447,6 +459,90 @@ fn stylesheet_response_origin_clean(document: &url::Url, resolved: &str) -> bool
         (url::Origin::Tuple(..), url::Origin::Tuple(..)) => document.origin() == resolved.origin(),
         (url::Origin::Opaque(_), url::Origin::Opaque(_)) => document.scheme() == resolved.scheme(),
         _ => false,
+    }
+}
+
+/// The key an image is cached and deduplicated under: the URL the request was
+/// made with and the state of the element's `crossorigin` content attribute.
+/// Two images on one URL with different CORS settings are different requests
+/// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ImageKey {
+    /// The URL the request was made with.
+    pub url: String,
+    /// The state of the element's `crossorigin` content attribute.
+    pub crossorigin: Option<blitz_traits::net::CorsSetting>,
+}
+
+/// The image request a node's pixels belong to.
+#[derive(Clone, Debug)]
+pub struct ImageRequestState {
+    pub key: ImageKey,
+    /// The element's `referrerpolicy` content attribute value at request
+    /// creation, unparsed.
+    pub referrer_policy: Option<String>,
+}
+
+/// One image request outcome for one node, reported to the embedder so it does
+/// not infer settlement from image state.
+#[derive(Clone, Debug)]
+pub struct ImageSettlement {
+    pub node: NodeId,
+    pub key: ImageKey,
+    pub outcome: ImageOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageOutcome {
+    /// The node's current request became this key and is waiting for pixels.
+    Started,
+    /// The request finished and the node holds its decoded image.
+    Loaded,
+    /// The request finished without usable pixels.
+    Failed,
+}
+
+/// Receives each image request state change for a node: its start, and then
+/// its outcome. An embedder keys its per-element image state off these events
+/// instead of recomputing Blitz's request identity.
+pub trait ImageSettleObserver: Send + Sync {
+    fn settled(&self, settlement: ImageSettlement);
+}
+
+impl BaseDocument {
+    /// The image request `node`'s pixels belong to.
+    #[must_use]
+    pub fn image_request(&self, node: NodeId) -> Option<&ImageRequestState> {
+        self.image_requests.get(&node)
+    }
+
+    /// Restarts `node`'s image request. A `picture` move changes the source
+    /// set without an attribute write, which HTML counts as a relevant
+    /// mutation
+    /// (<https://html.spec.whatwg.org/multipage/images.html#relevant-mutations>).
+    pub fn restart_image(&mut self, node: NodeId) {
+        self.mutate()
+            .load_image(node, crate::mutator::ImageMutation::Src);
+    }
+
+    /// Takes the nodes waiting on one image request, dropping the empty maps
+    /// behind it.
+    pub(crate) fn take_pending(&mut self, key: &ImageKey) -> Vec<(NodeId, ImageType)> {
+        let Some(by_crossorigin) = self.pending_images.get_mut(&key.url) else {
+            return Vec::new();
+        };
+        let waiters = by_crossorigin.remove(&key.crossorigin).unwrap_or_default();
+        if by_crossorigin.is_empty() {
+            self.pending_images.remove(&key.url);
+        }
+        waiters
+    }
+
+    pub(crate) fn notify_image_settled(&self, node: NodeId, key: ImageKey, outcome: ImageOutcome) {
+        let Some(observer) = self.image_settle.as_ref() else {
+            return;
+        };
+        observer.settled(ImageSettlement { node, key, outcome });
     }
 }
 
@@ -559,6 +655,7 @@ impl BaseDocument {
         let html_parser_provider = config
             .html_parser_provider
             .unwrap_or_else(|| Arc::new(DummyHtmlParserProvider));
+        let image_settle = config.image_settle;
 
         let (tx, rx) = channel();
 
@@ -614,6 +711,7 @@ impl BaseDocument {
             deferred_construction_nodes: Vec::new(),
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
+            image_requests: HashMap::new(),
             pending_style_image_nodes: Vec::new(),
             image_referrers: HashMap::new(),
             pending_critical_resources: HashSet::new(),
@@ -623,6 +721,7 @@ impl BaseDocument {
             net_provider,
             navigation_provider,
             shell_provider,
+            image_settle,
             html_parser_provider,
             abort_signal: config.abort_signal,
             last_mousedown_time: None,
@@ -1311,40 +1410,67 @@ impl BaseDocument {
     }
 
     pub fn reload_resource_by_href(&mut self, href_to_reload: &str) {
-        for &node_id in self.nodes_to_stylesheet.keys() {
-            let node = &self.nodes[node_id];
-            let Some(element) = node.element_data() else {
+        let owners: Vec<NodeId> = self.nodes_to_stylesheet.keys().copied().collect();
+        for node_id in owners {
+            let Some(href) = self
+                .get_node(node_id)
+                .and_then(|node| node.attr(local_name!("href")))
+                .map(str::to_owned)
+            else {
                 continue;
             };
-
-            if element.name.local == local_name!("link") {
-                if let Some(href) = element.attr(local_name!("href")) {
-                    // println!("Node {node_id} {href} {href_to_reload} {} {}", resolved_href.as_str(), resolved_href.as_str() == url_to_reload);
-                    if href == href_to_reload {
-                        let Some(resolved_href) = self.resolve_url(href) else {
-                            continue;
-                        };
-                        self.net_provider.fetch(
-                            self.id(),
-                            self.build_request(resolved_href.clone())
-                                .kind(blitz_traits::net::RequestKind::Stylesheet),
-                            ResourceHandler::boxed(
-                                self.tx.clone(),
-                                self.id,
-                                Some(node_id),
-                                self.shell_provider.clone(),
-                                StylesheetHandler {
-                                    source_url: resolved_href,
-                                    guard: self.guard.clone(),
-                                    net_provider: self.net_provider.clone(),
-                                    abort_signal: self.abort_signal.clone(),
-                                },
-                            ),
-                        );
-                    }
-                }
+            if href == href_to_reload
+                && let Some(url) = self.resolve_url(&href)
+            {
+                self.fetch_stylesheet(node_id, url, false);
             }
         }
+    }
+
+    /// Fetches the sheet at `url` for its owning node and returns the request
+    /// id. The owner is a `<link>` or an `xml-stylesheet` processing
+    /// instruction; only an element carries `crossorigin`, `referrerpolicy`,
+    /// and an `error` event. A sheet in `head` delays the document's load
+    /// event
+    /// (<https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet>,
+    /// <https://www.w3.org/TR/xml-stylesheet/>).
+    pub fn fetch_stylesheet(&mut self, owner: NodeId, url: url::Url, critical: bool) -> usize {
+        let element = self
+            .get_node(owner)
+            .is_some_and(|node| node.element_data().is_some())
+            .then_some(owner);
+        let handler = ResourceHandler::new(
+            self.tx.clone(),
+            self.id(),
+            Some(owner),
+            self.shell_provider.clone(),
+            StylesheetHandler {
+                source_url: url.clone(),
+                guard: self.guard.clone(),
+                net_provider: self.net_provider.clone(),
+                abort_signal: self.abort_signal.clone(),
+            },
+        );
+        if critical && !self.net_provider.is_noop() {
+            self.pending_critical_resources.insert(handler.request_id());
+        }
+        let request_id = handler.request_id();
+        let mut request = self
+            .build_request(url)
+            .kind(blitz_traits::net::RequestKind::Stylesheet);
+        if let Some(element) = element {
+            let node = self.get_node(element).expect("checked above");
+            request = request.node(element);
+            if let Some(setting) = node.cors_setting() {
+                request = request.crossorigin(setting);
+            }
+            if let Some(policy) = node.referrer_policy_attribute() {
+                request = request.referrer_policy(policy);
+            }
+        }
+        self.net_provider
+            .fetch(self.id(), request, Box::new(handler));
+        request_id
     }
 
     pub fn process_style_element(&mut self, target_id: NodeId) {
@@ -1708,23 +1834,28 @@ impl BaseDocument {
         let resource = match res.result {
             Ok(resource) => resource,
             Err(err) => {
-                if let Some(url) = res.resolved_url.as_ref() {
-                    let waiting_nodes = self.pending_images.remove(url).unwrap_or_default();
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        url = url.as_str(),
-                        waiting_nodes = waiting_nodes.len(),
-                        error = err.as_str(),
-                        "Resource load failed"
-                    );
-                    #[cfg(not(feature = "tracing"))]
-                    let _ = (waiting_nodes, err);
-                } else {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(error = err.as_str(), "Resource load failed (no url)");
-                    #[cfg(not(feature = "tracing"))]
-                    let _ = err;
+                // Only an image response owns `pending_images` entries, and
+                // an image response always names its key. A stylesheet or
+                // document failure with the same URL must not drop another
+                // request's waiters, and the CORS settings state is part of
+                // the key, so a same-URL request with other settings keeps
+                // its own.
+                if let Some(key) = res.image_key.as_ref() {
+                    let waiters = self.take_pending(key);
+                    for (node, image_type) in waiters {
+                        if matches!(image_type, ImageType::Image) {
+                            self.notify_image_settled(node, key.clone(), ImageOutcome::Failed);
+                        }
+                    }
                 }
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    url = res.resolved_url.as_deref().unwrap_or_default(),
+                    error = err.as_str(),
+                    "Resource load failed"
+                );
+                #[cfg(not(feature = "tracing"))]
+                let _ = err;
                 return;
             }
         };
@@ -1764,22 +1895,22 @@ impl BaseDocument {
                 // Create the ImageData and cache it
                 let image = ImageData::Raster(RasterImageData::new(width, height, image_data));
 
-                let Some(url) = res.resolved_url.as_ref() else {
+                let Some(key) = res.image_key.clone() else {
                     return;
                 };
 
-                self.apply_loaded_image(url, image);
+                self.apply_loaded_image(&key, image);
             }
             #[cfg(feature = "svg")]
             Resource::Svg(_kind, svg) => {
                 // Create the ImageData and cache it
                 let image = ImageData::Svg(svg);
 
-                let Some(url) = res.resolved_url.as_ref() else {
+                let Some(key) = res.image_key.clone() else {
                     return;
                 };
 
-                self.apply_loaded_image(url, image);
+                self.apply_loaded_image(&key, image);
             }
             Resource::DocumentSrc(html) => {
                 let Some(node_id) = res.node_id else {
@@ -1834,18 +1965,22 @@ impl BaseDocument {
 
     /// Cache a loaded image and apply it to all nodes waiting on it
     /// (`<img>` elements, `background-image` layers and `mask-image` layers).
-    fn apply_loaded_image(&mut self, url: &str, image: ImageData) {
+    fn apply_loaded_image(&mut self, key: &ImageKey, image: ImageData) {
         // Get all nodes waiting for this image
-        let waiting_nodes = self.pending_images.remove(url).unwrap_or_default();
+        let waiting_nodes = self.take_pending(key);
 
         #[cfg(feature = "tracing")]
         tracing::info!(
-            "Image {url} loaded, applying to {} nodes",
+            "Image {} loaded, applying to {} nodes",
+            key.url,
             waiting_nodes.len()
         );
 
         // Cache the image
-        self.image_cache.insert(url.to_string(), image.clone());
+        self.image_cache
+            .entry(key.url.clone())
+            .or_default()
+            .insert(key.crossorigin, image.clone());
 
         // Apply to all waiting nodes
         for (node_id, image_type) in waiting_nodes {
@@ -1865,6 +2000,7 @@ impl BaseDocument {
                     // Clear layout cache
                     node.clear_layout_cache();
                     node.insert_damage(ALL_DAMAGE);
+                    self.notify_image_settled(node_id, key.clone(), ImageOutcome::Loaded);
                 }
                 ImageType::Background(idx) | ImageType::Mask(idx) | ImageType::Content(idx) => {
                     let layer_image = node.element_data_mut().and_then(|el| {

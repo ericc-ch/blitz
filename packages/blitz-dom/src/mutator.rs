@@ -3,9 +3,10 @@ use std::collections::HashSet;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
+use crate::document::{ImageKey, ImageOutcome, ImageRequestState};
 use crate::layout::damage::ALL_DAMAGE;
-use crate::net::{ImageHandler, ResourceHandler, StylesheetHandler};
-use crate::node::{CanvasData, Dirtiness, NodeFlags, SpecialElementData};
+use crate::net::{ImageHandler, ResourceHandler};
+use crate::node::{CanvasData, Dirtiness, ImageData, NodeFlags, SpecialElementData};
 use crate::stylo_device::DeviceChanges;
 use crate::util::ImageType;
 use crate::{
@@ -606,7 +607,15 @@ impl DocumentMutator<'_> {
         // never enters a document. This must run before the detached
         // early-return below.
         if (tag, attr) == tag_and_attr!("img", "src") {
-            self.load_image(node_id);
+            self.load_image(node_id, ImageMutation::Src);
+            return;
+        }
+        if (tag, attr) == tag_and_attr!("img", "crossorigin") {
+            self.load_image(node_id, ImageMutation::CrossOrigin);
+            return;
+        }
+        if (tag, attr) == tag_and_attr!("img", "referrerpolicy") {
+            self.load_image(node_id, ImageMutation::ReferrerPolicy);
             return;
         }
 
@@ -626,6 +635,7 @@ impl DocumentMutator<'_> {
             self.load_custom_paint_src(node_id);
         } else if (tag, attr) == tag_and_attr!("link", "href")
             || (tag, attr) == tag_and_attr!("link", "rel")
+            || (tag, attr) == tag_and_attr!("link", "crossorigin")
         {
             self.load_linked_stylesheet(node_id);
         } else if (tag, attr) == tag_and_attr!("iframe", "src")
@@ -759,8 +769,14 @@ impl DocumentMutator<'_> {
             element.sync_checked_state();
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.recompute_is_animating = true;
+        } else if (tag, attr) == tag_and_attr!("img", "crossorigin") {
+            self.load_image(node_id, ImageMutation::CrossOrigin);
+        } else if (tag, attr) == tag_and_attr!("img", "referrerpolicy") {
+            self.load_image(node_id, ImageMutation::ReferrerPolicy);
         } else if (tag, attr) == tag_and_attr!("link", "href") {
             self.unload_stylesheet(node_id);
+        } else if (tag, attr) == tag_and_attr!("link", "crossorigin") {
+            self.load_linked_stylesheet(node_id);
         } else if (tag, attr) == tag_and_attr!("iframe", "srcdoc") && node_is_in_document {
             // Fall back to loading from the `src` attribute (if any)
             self.load_iframe(node_id);
@@ -1272,6 +1288,18 @@ impl DocumentMutator<'_> {
     }
 }
 
+/// Why an image's `load_image` ran. Setting `src` always restarts; inserting
+/// the element and the other two attributes only when their request state
+/// changes, so a DOM move keeps the request it already has
+/// (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageMutation {
+    Src,
+    Insert,
+    CrossOrigin,
+    ReferrerPolicy,
+}
+
 impl<'doc> DocumentMutator<'doc> {
     pub fn flush(&mut self) {
         if self.recompute_is_animating {
@@ -1312,7 +1340,9 @@ impl<'doc> DocumentMutator<'doc> {
         let mut ops = mem::take(&mut self.eager_op_queue);
         for op in ops.drain(0..) {
             match op {
-                SpecialOp::LoadImage(node_id) => self.load_image(node_id),
+                SpecialOp::LoadImage(node_id) => {
+                    self.load_image(node_id, ImageMutation::Insert);
+                }
                 SpecialOp::LoadIframe(node_id) => self.load_iframe(node_id),
                 SpecialOp::LoadStylesheet(node_id) => self.load_linked_stylesheet(node_id),
                 SpecialOp::LoadStylesheetPi(node_id) => self.load_pi_stylesheet(node_id),
@@ -1636,34 +1666,7 @@ impl<'doc> DocumentMutator<'doc> {
     /// Returns the request id, so a caller that can be asked for a different
     /// sheet later can drop a response for the old one.
     fn fetch_stylesheet(&mut self, owner: NodeId, url: url::Url, critical: bool) -> usize {
-        let handler = ResourceHandler::new(
-            self.doc.tx.clone(),
-            self.doc.id(),
-            Some(owner),
-            self.doc.shell_provider.clone(),
-            StylesheetHandler {
-                source_url: url.clone(),
-                guard: self.doc.guard.clone(),
-                net_provider: self.doc.net_provider.clone(),
-                abort_signal: self.doc.abort_signal.clone(),
-            },
-        );
-
-        if critical && !self.doc.net_provider.is_noop() {
-            self.doc
-                .pending_critical_resources
-                .insert(handler.request_id());
-        }
-
-        let request_id = handler.request_id();
-        self.doc.net_provider.fetch(
-            self.doc.id(),
-            self.doc
-                .build_request(url)
-                .kind(blitz_traits::net::RequestKind::Stylesheet),
-            Box::new(handler),
-        );
-        request_id
+        self.doc.fetch_stylesheet(owner, url, critical)
     }
 
     /// Loads the sheet an `xml-stylesheet` processing instruction names
@@ -1758,61 +1761,154 @@ impl<'doc> DocumentMutator<'doc> {
         self.doc.stylesheet_generation += 1;
     }
 
-    fn load_image(&mut self, target_id: NodeId) {
+    pub(crate) fn load_image(&mut self, target_id: NodeId, mutation: ImageMutation) {
         let node = &self.doc.nodes[target_id];
-        if let Some(raw_src) = node.attr(local_name!("src")) {
-            if !raw_src.is_empty() {
-                let Some(src) = self.doc.resolve_url(raw_src) else {
-                    // Unresolvable `<img src>`: no fetch and (today) no `error`
-                    // event. Better than panicking; event semantics are a known
-                    // gap.
-                    return;
-                };
-                let src_string = src.as_str();
-
-                // Check cache first
-                if let Some(cached_image) = self.doc.image_cache.get(src_string) {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("Loading image {src_string} from cache");
-                    let node = &mut self.doc.nodes[target_id];
-                    node.element_data_mut().unwrap().special_data =
-                        SpecialElementData::Image(Box::new(cached_image.clone()));
-                    node.clear_layout_cache();
-                    node.insert_damage(ALL_DAMAGE);
-                    return;
-                }
-
-                // Check if there's already a pending request for this URL
-                if let Some(waiting_list) = self.doc.pending_images.get_mut(src_string) {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("Image {src_string} already pending, queueing node {target_id}");
-                    waiting_list.push((target_id, ImageType::Image));
-                    return;
-                }
-
-                // Start fetch and track as pending
-                #[cfg(feature = "tracing")]
-                tracing::info!("Fetching image {src_string}");
-                self.doc
-                    .pending_images
-                    .insert(src_string.to_string(), vec![(target_id, ImageType::Image)]);
-
-                let source_url = src_string.to_string();
-                self.doc.net_provider.fetch(
-                    self.doc.id(),
-                    self.doc
-                        .build_request(src)
-                        .kind(blitz_traits::net::RequestKind::Image),
-                    ResourceHandler::boxed(
-                        self.doc.tx.clone(),
-                        self.doc.id(),
-                        None, // Don't pass node_id, we'll handle it via pending_images
-                        self.doc.shell_provider.clone(),
-                        ImageHandler::new(ImageType::Image, source_url),
-                    ),
-                );
-            }
+        let raw_src = node.attr(local_name!("src"));
+        let has_source_set = node
+            .attr(local_name!("srcset"))
+            .is_some_and(|set| !set.trim().is_empty())
+            || node.parent.is_some_and(|parent| {
+                self.doc.get_node(parent).is_some_and(|parent| {
+                    parent.element_data().is_some_and(|element| {
+                        element.name.local == local_name!("picture")
+                            && parent.children.iter().any(|child| {
+                                self.doc.get_node(*child).is_some_and(|child| {
+                                    child.element_data().is_some_and(|element| {
+                                        element.name.local == local_name!("source")
+                                            && element
+                                                .attr(local_name!("srcset"))
+                                                .is_some_and(|set| !set.trim().is_empty())
+                                    })
+                                })
+                            })
+                    })
+                })
+            });
+        // No `src` and no source set is no request at all: the element is
+        // complete without one
+        // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+        if raw_src.is_none() && !has_source_set {
+            return;
         }
+        let src = raw_src
+            .filter(|src| !src.is_empty())
+            .and_then(|raw| self.doc.resolve_url(raw));
+        let crossorigin = node.cors_setting();
+        let referrer_policy = node.referrer_policy_attribute();
+        let key = ImageKey {
+            url: src.as_ref().map_or_else(
+                || raw_src.unwrap_or_default().to_owned(),
+                |src| src.as_str().to_owned(),
+            ),
+            crossorigin,
+        };
+        // HTML restarts the update when `crossorigin` or `referrerpolicy`
+        // changes *state*; a write that leaves the state alone does nothing
+        // (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
+        let state = ImageRequestState {
+            key: key.clone(),
+            referrer_policy: referrer_policy.clone(),
+        };
+        if mutation != ImageMutation::Src
+            && self
+                .doc
+                .image_requests
+                .get(&target_id)
+                .is_some_and(|previous| {
+                    previous.key == state.key && previous.referrer_policy == state.referrer_policy
+                })
+        {
+            return;
+        }
+        // The node's old pixels belong to its old request; the new request's
+        // image data is unavailable until it settles
+        // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+        let previous = self.doc.image_requests.insert(target_id, state);
+        if let Some(previous) = previous
+            && previous.key != key
+            && let Some(waiters) = self
+                .doc
+                .pending_images
+                .get_mut(&previous.key.url)
+                .and_then(|by_crossorigin| by_crossorigin.get_mut(&previous.key.crossorigin))
+        {
+            waiters.retain(|(node, _)| *node != target_id);
+        }
+        let node = &mut self.doc.nodes[target_id];
+        if let Some(element) = node.element_data_mut() {
+            element.special_data = SpecialElementData::Image(Box::new(ImageData::None));
+        }
+        node.clear_layout_cache();
+        node.insert_damage(ALL_DAMAGE);
+
+        self.doc
+            .notify_image_settled(target_id, key.clone(), ImageOutcome::Started);
+        // An empty attribute, a URL that cannot be resolved, and a source set
+        // (`srcset`, or a `<picture>` `<source>`) this engine cannot select
+        // from all leave the request broken. A
+        // broken request fires `error` instead of leaving the element waiting
+        // for pixels that will never arrive
+        // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+        let Some(src) = src else {
+            self.doc
+                .notify_image_settled(target_id, key, ImageOutcome::Failed);
+            return;
+        };
+        if let Some(image) = self
+            .doc
+            .image_cache
+            .get(&key.url)
+            .and_then(|by_crossorigin| by_crossorigin.get(&key.crossorigin))
+            .cloned()
+        {
+            let node = &mut self.doc.nodes[target_id];
+            node.element_data_mut().unwrap().special_data =
+                SpecialElementData::Image(Box::new(image));
+            node.clear_layout_cache();
+            node.insert_damage(ALL_DAMAGE);
+            self.doc
+                .notify_image_settled(target_id, key, ImageOutcome::Loaded);
+            return;
+        }
+
+        if let Some(waiting_list) = self
+            .doc
+            .pending_images
+            .get_mut(&key.url)
+            .and_then(|by_crossorigin| by_crossorigin.get_mut(&key.crossorigin))
+        {
+            waiting_list.push((target_id, ImageType::Image));
+            return;
+        }
+
+        self.doc
+            .pending_images
+            .entry(key.url.clone())
+            .or_default()
+            .insert(key.crossorigin, vec![(target_id, ImageType::Image)]);
+
+        let mut request = self
+            .doc
+            .build_request(src)
+            .kind(blitz_traits::net::RequestKind::Image)
+            .node(target_id);
+        if let Some(crossorigin) = crossorigin {
+            request = request.crossorigin(crossorigin);
+        }
+        if let Some(referrer_policy) = referrer_policy {
+            request = request.referrer_policy(referrer_policy);
+        }
+        self.doc.net_provider.fetch(
+            self.doc.id(),
+            request,
+            ResourceHandler::boxed(
+                self.doc.tx.clone(),
+                self.doc.id(),
+                None, // Handled through `pending_images`.
+                self.doc.shell_provider.clone(),
+                ImageHandler::new(ImageType::Image, key),
+            ),
+        );
     }
 
     fn load_iframe(&mut self, target_id: NodeId) {

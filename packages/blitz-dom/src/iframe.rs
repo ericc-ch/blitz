@@ -65,6 +65,7 @@ impl BaseDocument {
                 shell_provider: self.shell_provider.clone(),
             })),
             shell_provider: Some(self.shell_provider.clone()),
+            image_settle: None,
             html_parser_provider: Some(self.html_parser_provider.clone()),
             font_ctx: Some(self.font_ctx.lock().unwrap().clone()),
             media_type: Some(self.media_type.clone()),

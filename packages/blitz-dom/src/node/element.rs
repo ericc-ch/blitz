@@ -607,6 +607,22 @@ impl ElementData {
         Some(&attr.value)
     }
 
+    /// The element's `crossorigin` CORS settings state. An absent attribute is
+    /// the `No CORS` state; a present one that names no keyword takes the
+    /// invalid value default
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
+    pub fn cors_setting(&self) -> Option<blitz_traits::net::CorsSetting> {
+        self.attr(local_name!("crossorigin"))
+            .map(blitz_traits::net::CorsSetting::parse)
+    }
+
+    /// The element's raw `referrerpolicy` value, sampled when a request is
+    /// created
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
+    pub fn referrer_policy_attribute(&self) -> Option<String> {
+        self.attr(local_name!("referrerpolicy")).map(str::to_owned)
+    }
+
     pub fn attr_parsed<T: FromStr>(&self, name: impl PartialEq<LocalName>) -> Option<T> {
         let attr = self.attrs.iter().find(|attr| name == attr.name.local)?;
         attr.value.parse::<T>().ok()

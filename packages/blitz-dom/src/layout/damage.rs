@@ -3,6 +3,7 @@ use blitz_traits::node_id::NodeId;
 use markup5ever::local_name;
 use stylo_taffy::CopyStyleGetters;
 
+use crate::document::ImageKey;
 use crate::net::ResourceHandler;
 use crate::node::{Node, NodeFlags};
 use crate::tree::NodeTree;
@@ -587,9 +588,14 @@ impl BaseDocument {
                         continue;
                     }
 
-                    // Check cache first
+                    // Check cache first. A background image has no
+                    // `crossorigin` state, so its request is the `None` entry.
                     let url_str = new_url.as_str();
-                    if let Some(cached_image) = self.image_cache.get(url_str) {
+                    if let Some(cached_image) = self
+                        .image_cache
+                        .get(url_str)
+                        .and_then(|by_crossorigin| by_crossorigin.get(&None))
+                    {
                         #[cfg(feature = "tracing")]
                         tracing::info!("Loading image {url_str} from cache");
                         Some(ImageResourceData {
@@ -597,7 +603,11 @@ impl BaseDocument {
                             status: Status::Ok,
                             image: cached_image.clone(),
                         })
-                    } else if let Some(waiting_list) = self.pending_images.get_mut(url_str) {
+                    } else if let Some(waiting_list) = self
+                        .pending_images
+                        .get_mut(url_str)
+                        .and_then(|by_crossorigin| by_crossorigin.get_mut(&None))
+                    {
                         // Image is already being fetched, queue this node
                         #[cfg(feature = "tracing")]
                         tracing::info!("Image {url_str} already pending, queueing node {node_id}");
@@ -608,7 +618,13 @@ impl BaseDocument {
                         #[cfg(feature = "tracing")]
                         tracing::info!("Fetching image {url_str}");
                         self.pending_images
-                            .insert(url_str.to_string(), vec![(node_id, kind.image_type(idx))]);
+                            .entry(url_str.to_owned())
+                            .or_default()
+                            .insert(None, vec![(node_id, kind.image_type(idx))]);
+                        let key = ImageKey {
+                            url: url_str.to_owned(),
+                            crossorigin: None,
+                        };
 
                         // A URL a style sheet declared sends that sheet as its
                         // referrer; one from an inline `<style>` or `style`
@@ -628,7 +644,7 @@ impl BaseDocument {
                                 doc_id,
                                 None, // Don't pass node_id, we'll handle via pending_images
                                 self.shell_provider.clone(),
-                                ImageHandler::new(kind.image_type(idx), url_str.to_string()),
+                                ImageHandler::new(kind.image_type(idx), key),
                             ),
                         );
 

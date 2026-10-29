@@ -64,6 +64,9 @@ impl NavigationOptions {
             body: self.document_resource,
             signal: None,
             kind: crate::net::RequestKind::Other,
+            node: None,
+            crossorigin: None,
+            referrer_policy: None,
             style_sheet: None,
         }
     }

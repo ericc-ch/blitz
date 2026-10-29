@@ -47,6 +47,45 @@ impl<F: Fn(usize) + Send + Sync + 'static> NetWaker for F {
     }
 }
 
+/// The state of a present `crossorigin` content attribute
+/// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
+///
+/// An absent attribute is the `No CORS` state and is `None` where this type is
+/// carried. A present attribute that names no keyword takes the invalid value
+/// default, [`CorsSetting::Anonymous`], so a bad spelling never sends
+/// credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CorsSetting {
+    /// CORS mode with `same-origin` credentials.
+    Anonymous,
+    /// CORS mode with `include` credentials.
+    UseCredentials,
+}
+
+impl CorsSetting {
+    /// Parses one content attribute value, ASCII case-insensitively and
+    /// untrimmed: enumerated attribute values keep their padding, so
+    /// `" use-credentials"` is the invalid value default.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("use-credentials") {
+            Self::UseCredentials
+        } else {
+            Self::Anonymous
+        }
+    }
+
+    /// The canonical keyword the attribute reflects
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#dom-crossorigin>).
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::UseCredentials => "use-credentials",
+        }
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 /// A request type loosely representing <https://fetch.spec.whatwg.org/#requests>
@@ -61,6 +100,21 @@ pub struct Request {
     /// this instead of guessing from the URL
     /// (<https://fetch.spec.whatwg.org/#concept-request-destination>).
     pub kind: RequestKind,
+    /// The element that initiated the request, when one did. The embedder
+    /// reads its element-scoped state (`referrerpolicy`, CSP destination) from
+    /// this node instead of matching a URL back to an element
+    /// (<https://fetch.spec.whatwg.org/#concept-request-client>).
+    pub node: Option<crate::node_id::NodeId>,
+    /// The state of the `crossorigin` content attribute of the element that
+    /// initiated the request. It is part of the image cache key, so two images
+    /// on one URL with different CORS settings are different requests
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
+    pub crossorigin: Option<CorsSetting>,
+    /// The raw `referrerpolicy` content attribute value of the element that
+    /// initiated the request, sampled when the request was created. HTML
+    /// samples it with the CORS state; the embedder owns the keyword rule
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
+    pub referrer_policy: Option<String>,
     /// The CSS style sheet responsible for this request, when one is: the
     /// sheet's location is the request's referrer, and its response's
     /// `Referrer-Policy` is the request's policy
@@ -94,6 +148,9 @@ impl Request {
             body: Body::Empty,
             signal: None,
             kind: RequestKind::Other,
+            node: None,
+            crossorigin: None,
+            referrer_policy: None,
             style_sheet: None,
         }
     }
@@ -106,6 +163,26 @@ impl Request {
     /// Marks what the request fetches.
     pub fn kind(mut self, kind: RequestKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Marks the element that initiated the request.
+    pub fn node(mut self, node: crate::node_id::NodeId) -> Self {
+        self.node = Some(node);
+        self
+    }
+
+    /// Marks the CORS settings state of the element that initiated the
+    /// request.
+    pub fn crossorigin(mut self, value: CorsSetting) -> Self {
+        self.crossorigin = Some(value);
+        self
+    }
+
+    /// Marks the raw `referrerpolicy` content attribute value of the element
+    /// that initiated the request, sampled when the request was created.
+    pub fn referrer_policy(mut self, value: String) -> Self {
+        self.referrer_policy = Some(value);
         self
     }
 
@@ -249,5 +326,29 @@ impl AbortSignal {
     /// <https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/aborted>
     pub fn aborted(&self) -> bool {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CorsSetting;
+
+    #[test]
+    fn a_crossorigin_attribute_is_an_untrimmed_keyword() {
+        assert_eq!(CorsSetting::parse(""), CorsSetting::Anonymous);
+        // A padded value is invalid because an enumerated attribute does not
+        // trim its value, and the invalid value default never sends
+        // credentials
+        // (<https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#enumerated-attribute>).
+        assert_eq!(
+            CorsSetting::parse(" use-credentials"),
+            CorsSetting::Anonymous
+        );
+        assert_eq!(
+            CorsSetting::parse("USE-CREDENTIALS"),
+            CorsSetting::UseCredentials
+        );
+        assert_eq!(CorsSetting::UseCredentials.keyword(), "use-credentials");
+        assert_eq!(CorsSetting::Anonymous.keyword(), "anonymous");
     }
 }
