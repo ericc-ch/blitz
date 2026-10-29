@@ -98,9 +98,8 @@ pub struct ElementData {
     /// (<https://dom.spec.whatwg.org/#dom-element-shadowroot>).
     pub shadow_root: Option<NodeId>,
 
-    /// Dirty value, checkedness, selectedness, and indeterminate.
-    /// Absent flags fall back to the content attribute or descendant text
-    /// (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#definitions>).
+    /// Current value, checkedness, selectedness, and indeterminate, with the
+    /// flags that decide whether a content attribute still drives them.
     pub form_state: FormControlState,
     // /// Whether the node is a [HTML integration point] (https://html.spec.whatwg.org/multipage/#html-integration-point)
     // pub mathml_annotation_xml_integration_point: bool,
@@ -147,17 +146,35 @@ pub struct ElementData {
 
 /// Live form-control state that is not the content attribute.
 ///
-/// <https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>
-/// <https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>
-/// <https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>
+/// Every slot is authoritative: readers return the slot, never the attribute.
+/// The `dirty_*` flags are the spec's dirty flags, so a content attribute
+/// change updates a slot only while its flag is clear, and the flag means only
+/// what the spec says it means. The shape matters because options and inputs
+/// write selectedness and checkedness without dirtying them
+/// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>,
+/// <https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-dirtiness>,
+/// <https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>,
+/// <https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>).
 #[derive(Clone, Debug, Default)]
 pub struct FormControlState {
-    pub dirty_value: bool,
+    /// The current value
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
     pub value: String,
-    pub dirty_checkedness: bool,
+    /// Whether the value was last set by script or a user edit
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>).
+    pub dirty_value: bool,
+    /// The current checkedness
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>).
     pub checkedness: bool,
-    pub dirty_selectedness: bool,
+    /// Whether the `checked` IDL attribute last set the checkedness
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked-dirty>).
+    pub dirty_checkedness: bool,
+    /// The current selectedness
+    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>).
     pub selectedness: bool,
+    /// Whether the selectedness was last set by script
+    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-dirtiness>).
+    pub dirty_selectedness: bool,
     pub indeterminate: bool,
 }
 
@@ -501,6 +518,22 @@ impl ElementData {
         data.flush_is_focussable();
         data.flush_link_state();
 
+        // The control slots start from the attributes: a created element's
+        // current value, checkedness, and selectedness are the attribute's
+        // (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>,
+        // <https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>).
+        // Parsers build elements with their attributes in one step instead of
+        // going through `set_attribute`, so this is the only place they see
+        // them.
+        if let Some(value) = data.attr(local_name!("value")) {
+            data.form_state.value = value.to_owned();
+        }
+        if data.name.local == local_name!("input") {
+            data.form_state.checkedness = data.has_attr(local_name!("checked"));
+        } else if data.name.local == local_name!("option") {
+            data.form_state.selectedness = data.has_attr(local_name!("selected"));
+        }
+
         // Mirror the `checked` attribute into the element state so that `:checked`
         // selectors can be matched (and invalidated) from `ElementState`.
         // A selected `option` uses the same bit
@@ -594,7 +627,7 @@ impl ElementData {
         } else {
             match self.name.local.as_ref() {
                 "textarea" => fallback_value_empty,
-                "input" => self.attr(local_name!("value")).unwrap_or("").is_empty(),
+                "input" => self.form_state.value.is_empty(),
                 _ => return false,
             }
         };
@@ -605,57 +638,62 @@ impl ElementData {
         }
     }
 
-    /// The current value of a text control: the dirty value when the flag is
-    /// set, otherwise the `value` content attribute
+    /// The current value of a text control
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
+    /// A textarea ignores the slot until its value is set, so its default
+    /// stays its descendant text.
     pub fn control_value(&self) -> &str {
-        if self.form_state.dirty_value {
-            &self.form_state.value
-        } else {
-            self.attr(local_name!("value")).unwrap_or("")
-        }
+        &self.form_state.value
     }
 
-    /// Checkedness: the dirty flag when set, otherwise the `checked` attribute
+    /// The current checkedness
     /// (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked>).
     pub fn checkedness(&self) -> bool {
-        if self.form_state.dirty_checkedness {
-            self.form_state.checkedness
-        } else {
-            self.has_attr(local_name!("checked"))
-        }
+        self.form_state.checkedness
     }
 
-    /// Selectedness: the dirty flag when set, otherwise the `selected` attribute
+    /// The current selectedness
     /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-selectedness>).
     pub fn selectedness(&self) -> bool {
-        if self.form_state.dirty_selectedness {
-            self.form_state.selectedness
-        } else {
-            self.has_attr(local_name!("selected"))
-        }
+        self.form_state.selectedness
     }
 
-    /// Records a dirty value and refreshes `:placeholder-shown`.
-    pub fn store_dirty_value(&mut self, value: String) {
-        self.form_state.dirty_value = true;
+    /// Stores the current value. `dirty` is the value of the dirty value flag
+    /// afterwards: the value IDL setter and user edits pass true, and the
+    /// type-change step that reloads the default passes false
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
+    pub fn store_value(&mut self, value: String, dirty: bool) {
         self.form_state.value = value;
+        self.form_state.dirty_value = dirty;
         let empty = self.form_state.value.is_empty();
         self.sync_placeholder_shown(empty);
     }
 
-    /// Records dirty checkedness and the `:checked` bit.
-    pub fn store_checkedness(&mut self, checked: bool) {
-        self.form_state.dirty_checkedness = true;
+    /// Stores the current checkedness. `dirty` marks the checkedness flag as
+    /// script-set; activation passes false and leaves an earlier dirty flag
+    /// alone (<https://html.spec.whatwg.org/multipage/input.html#concept-input-checked-dirty>).
+    pub fn store_checkedness(&mut self, checked: bool, dirty: bool) {
         self.form_state.checkedness = checked;
+        self.form_state.dirty_checkedness |= dirty;
         self.set_checkbox_input_checked(checked);
     }
 
-    /// Records dirty selectedness. Options match `:checked` from the same bit.
-    pub fn store_selectedness(&mut self, selected: bool) {
-        self.form_state.dirty_selectedness = true;
+    /// Stores the current selectedness. `dirty` marks it script-set; the
+    /// selectedness setting algorithm and the `Option()` constructor pass
+    /// false, so a later `selected` attribute change still applies
+    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-dirtiness>).
+    /// Options match `:checked` from the same bit.
+    pub fn store_selectedness(&mut self, selected: bool, dirty: bool) {
         self.form_state.selectedness = selected;
+        self.form_state.dirty_selectedness |= dirty;
         self.element_state.set(ElementState::CHECKED, selected);
+    }
+
+    /// Clears the selectedness dirtiness so the `selected` attribute drives
+    /// the slot again
+    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element>).
+    pub fn clear_selectedness_dirtiness(&mut self) {
+        self.form_state.dirty_selectedness = false;
     }
 
     /// The indeterminate IDL flag. It is not a content attribute
@@ -678,6 +716,11 @@ impl ElementData {
             )
             && self.has_attr(local_name!("checked"))
             || self.name.local == local_name!("option") && self.has_attr(local_name!("selected"));
+        if self.name.local == local_name!("input") {
+            self.form_state.checkedness = checked;
+        } else if self.name.local == local_name!("option") {
+            self.form_state.selectedness = checked;
+        }
         self.element_state.set(ElementState::CHECKED, checked);
         self.element_state.set(ElementState::INDETERMINATE, false);
         if let Some(slot) = self.checkbox_input_checked_mut() {

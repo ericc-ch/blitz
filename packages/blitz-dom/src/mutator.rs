@@ -444,8 +444,11 @@ impl DocumentMutator<'_> {
             element.flush_link_state();
         }
 
-        let tag = &element.name.local;
         let attr = &name.local;
+        let checked_attribute =
+            *attr == local_name!("checked") && element.name.local == local_name!("input");
+        let selected_attribute =
+            *attr == local_name!("selected") && element.name.local == local_name!("option");
 
         if *attr == local_name!("id") {
             element.id = Some(Atom::from(value))
@@ -456,21 +459,35 @@ impl DocumentMutator<'_> {
         }
 
         if *attr == local_name!("value") {
-            // A dirty value keeps the current value when the attribute changes
-            // (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-dirty>).
-            if !element.form_state.dirty_value
-                && let Some(input_data) = element.text_input_data_mut()
-            {
-                input_data.set_text(
-                    &mut self.doc.font_ctx.lock().unwrap(),
-                    &mut self.doc.layout_ctx,
-                    value,
-                );
+            // While the dirty value flag is clear the attribute drives the
+            // value slot; a dirty value ignores the attribute
+            // (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
+            // An embedder's sanitization rewrites the slot from the attribute
+            // through `set_value` afterwards.
+            if !element.form_state.dirty_value {
+                element.form_state.value.clear();
+                element.form_state.value.push_str(value);
+                if let Some(input_data) = element.text_input_data_mut() {
+                    input_data.set_text(
+                        &mut self.doc.font_ctx.lock().unwrap(),
+                        &mut self.doc.layout_ctx,
+                        value,
+                    );
+                }
             }
             if refresh_placeholder {
                 element.sync_placeholder_shown(textarea_text_empty);
             }
             return;
+        }
+
+        // The checkedness and selectedness slots follow their attributes
+        // whether or not the node is in a document: `new Image()` and a
+        // detached option both read them before insertion.
+        if checked_attribute && !element.form_state.dirty_checkedness {
+            element.store_checkedness(true, false);
+        } else if selected_attribute && !element.form_state.dirty_selectedness {
+            element.store_selectedness(true, false);
         }
 
         if *attr == local_name!("style") {
@@ -483,6 +500,8 @@ impl DocumentMutator<'_> {
             node.disable();
             return;
         }
+
+        let tag = &element.name.local;
 
         // An `<img>` loads from its `src` even while detached: `new Image()`
         // never enters a document. This must run before the detached
@@ -504,16 +523,7 @@ impl DocumentMutator<'_> {
             return;
         }
 
-        if (tag, attr) == tag_and_attr!("input", "checked") {
-            if !element.form_state.dirty_checkedness {
-                set_input_checked_state(element, value.to_string());
-                element.element_state.insert(ElementState::CHECKED);
-            }
-        } else if (tag, attr) == tag_and_attr!("option", "selected") {
-            if !element.form_state.dirty_selectedness {
-                element.element_state.insert(ElementState::CHECKED);
-            }
-        } else if (tag, attr) == tag_and_attr!("canvas", "src") {
+        if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.load_custom_paint_src(node_id);
         } else if (tag, attr) == tag_and_attr!("link", "href")
             || (tag, attr) == tag_and_attr!("link", "rel")
@@ -611,6 +621,7 @@ impl DocumentMutator<'_> {
         }
 
         if name.local == local_name!("value") && !element.form_state.dirty_value {
+            element.form_state.value.clear();
             if let Some(input_data) = element.text_input_data_mut() {
                 input_data.set_text(
                     &mut self.doc.font_ctx.lock().unwrap(),
@@ -636,11 +647,11 @@ impl DocumentMutator<'_> {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         } else if (tag, attr) == tag_and_attr!("input", "checked") {
             if !element.form_state.dirty_checkedness {
-                element.set_checkbox_input_checked(false);
+                element.store_checkedness(false, false);
             }
         } else if (tag, attr) == tag_and_attr!("option", "selected") {
             if !element.form_state.dirty_selectedness {
-                element.element_state.remove(ElementState::CHECKED);
+                element.store_selectedness(false, false);
             }
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.recompute_is_animating = true;
@@ -652,14 +663,14 @@ impl DocumentMutator<'_> {
         }
     }
 
-    /// Sets the dirty value and refreshes `:placeholder-shown`. The content
-    /// attribute stays the default value
-    /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-value>).
-    pub fn set_dirty_value(&mut self, node_id: NodeId, value: String) {
+    /// Stores the current value and its dirty value flag, and refreshes
+    /// `:placeholder-shown`. The content attribute stays the default value
+    /// (<https://html.spec.whatwg.org/multipage/input.html#concept-fe-value>).
+    pub fn set_value(&mut self, node_id: NodeId, value: String, dirty: bool) {
         self.doc
             .snapshot_node_and(node_id, ElementState::PLACEHOLDER_SHOWN, |node| {
                 if let Some(element) = node.element_data_mut() {
-                    element.store_dirty_value(value.clone());
+                    element.store_value(value.clone(), dirty);
                 }
             });
         // Once layout builds an editor it is the live value, so the text must
@@ -678,26 +689,38 @@ impl DocumentMutator<'_> {
         }
     }
 
-    /// Sets dirty checkedness without writing the `checked` attribute
+    /// Sets checkedness without writing the `checked` attribute. `dirty`
+    /// marks it script-set; activation passes false
     /// (<https://html.spec.whatwg.org/multipage/input.html#dom-input-checked>).
-    pub fn set_checkedness(&mut self, node_id: NodeId, checked: bool) {
+    pub fn set_checkedness(&mut self, node_id: NodeId, checked: bool, dirty: bool) {
         self.doc
             .snapshot_node_and(node_id, ElementState::CHECKED, |node| {
                 if let Some(element) = node.element_data_mut() {
-                    element.store_checkedness(checked);
+                    element.store_checkedness(checked, dirty);
                 }
             });
     }
 
-    /// Sets dirty selectedness without writing the `selected` attribute
+    /// Sets selectedness without writing the `selected` attribute. `dirty`
+    /// marks it script-set; the selectedness setting algorithm and the
+    /// `Option()` constructor pass false
     /// (<https://html.spec.whatwg.org/multipage/form-elements.html#dom-option-selected>).
-    pub fn set_selectedness(&mut self, node_id: NodeId, selected: bool) {
+    pub fn set_selectedness(&mut self, node_id: NodeId, selected: bool, dirty: bool) {
         self.doc
             .snapshot_node_and(node_id, ElementState::CHECKED, |node| {
                 if let Some(element) = node.element_data_mut() {
-                    element.store_selectedness(selected);
+                    element.store_selectedness(selected, dirty);
                 }
             });
+    }
+
+    /// Clears an option's selectedness dirtiness so its `selected` attribute
+    /// drives the slot again
+    /// (<https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element>).
+    pub fn clear_selectedness_dirtiness(&mut self, node_id: NodeId) {
+        if let Some(element) = self.doc.nodes[node_id].element_data_mut() {
+            element.clear_selectedness_dirtiness();
+        }
     }
 
     /// Sets the indeterminate flag
@@ -1779,25 +1802,6 @@ impl<'doc> DocumentMutator<'doc> {
             self.append_children(label_id, &[text_id]);
             self.append_children(button_id, &[button_text_id]);
         }
-    }
-}
-
-/// Set 'checked' state on an input based on given attributevalue
-fn set_input_checked_state(element: &mut ElementData, value: String) {
-    let Ok(checked) = value.parse() else {
-        return;
-    };
-    match element.special_data {
-        SpecialElementData::CheckboxInput(_) => element.set_checkbox_input_checked(checked),
-        // If we have just constructed the element, set the node attribute,
-        // and NodeSpecificData will be created from that later
-        // this simulates the checked attribute being set in html,
-        // and the element's checked property being set from that
-        SpecialElementData::None => element.attrs.push(Attribute {
-            name: qual_name!("checked", html),
-            value: checked.to_string(),
-        }),
-        _ => {}
     }
 }
 
