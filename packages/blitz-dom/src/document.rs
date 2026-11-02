@@ -382,8 +382,10 @@ pub struct BaseDocument {
     pub(crate) pending_resource_deallocations: Vec<anyrender::ResourceId>,
 
     /// Decoded images, by request URL and CORS settings state. Two elements on
-    /// one URL with different `crossorigin` values are different requests.
-    pub(crate) image_cache: HashMap<Url, HashMap<Option<blitz_traits::net::CorsSetting>, ImageData>>,
+    /// one URL with different `crossorigin` values are different requests. Each
+    /// entry keeps the response taint, so a node answered from the cache gets
+    /// the taint its own request would have carried.
+    pub(crate) image_cache: HashMap<Url, HashMap<Option<blitz_traits::net::CorsSetting>, CachedImage>>,
 
     /// In-flight image requests, keyed like [`BaseDocument::image_cache`].
     pub(crate) pending_images:
@@ -479,16 +481,57 @@ pub struct ImageRequestState {
     /// The element's `referrerpolicy` content attribute value at request
     /// creation, unparsed.
     pub referrer_policy: Option<String>,
+    /// Whether the request is waiting for pixels, and if not, what it settled
+    /// as. This is the element's one request record: `currentSrc`, `complete`,
+    /// `naturalWidth`, and `drawImage` read it instead of keeping copies
+    /// (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+    pub status: ImageRequestStatus,
+    /// The response's final URL after redirects, once one arrived.
+    pub final_url: Option<Url>,
+    /// Whether the settled pixels are origin-clean for canvas
+    /// (<https://html.spec.whatwg.org/multipage/canvas.html#the-image-argument>).
+    pub origin_clean: bool,
 }
 
-/// One image request outcome for one node, reported to the embedder so it does
-/// not infer settlement from image state.
+/// Where an image request stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageRequestStatus {
+    /// The request has not settled: the element cannot be drawn or read.
+    Pending,
+    /// The request finished and the element holds its decoded image.
+    Loaded,
+    /// The request finished without usable pixels.
+    Failed,
+}
+
+/// One decoded image in the document's cache, with the taint its response
+/// settled with, so a node answered from the cache keeps the taint its own
+/// request would have carried
+/// (<https://html.spec.whatwg.org/multipage/canvas.html#the-image-argument>).
+#[derive(Clone)]
+pub(crate) struct CachedImage {
+    pub(crate) image: ImageData,
+    pub(crate) origin_clean: bool,
+    pub(crate) final_url: Option<Url>,
+}
+
+impl CachedImage {
+    /// The cache entry a request settles with.
+    pub(crate) fn new(image: ImageData, final_url: Option<Url>, origin_clean: bool) -> Self {
+        Self {
+            image,
+            origin_clean,
+            final_url,
+        }
+    }
+}
+
+/// One image request outcome for one node, reported to the embedder so it can
+/// attach its load-delay token and queue the element's event without keeping a
+/// copy of request state.
 #[derive(Clone, Debug)]
 pub struct ImageSettlement {
     pub node: NodeId,
-    /// The request the outcome belongs to, or `None` for a source that named
-    /// no absolute URL.
-    pub key: Option<ImageKey>,
     pub outcome: ImageOutcome,
 }
 
@@ -538,16 +581,11 @@ impl BaseDocument {
         waiters
     }
 
-    pub(crate) fn notify_image_settled(
-        &self,
-        node: NodeId,
-        key: Option<ImageKey>,
-        outcome: ImageOutcome,
-    ) {
+    pub(crate) fn notify_image_settled(&self, node: NodeId, outcome: ImageOutcome) {
         let Some(observer) = self.image_settle.as_ref() else {
             return;
         };
-        observer.settled(ImageSettlement { node, key, outcome });
+        observer.settled(ImageSettlement { node, outcome });
     }
 }
 
@@ -1847,13 +1885,11 @@ impl BaseDocument {
                 // its own.
                 if let Some(key) = res.image_key.as_ref() {
                     let waiters = self.take_pending(key);
+                    let final_url = res.resolved_url.as_deref().and_then(|url| Url::parse(url).ok());
                     for (node, image_type) in waiters {
                         if matches!(image_type, ImageType::Image) {
-                            self.notify_image_settled(
-                                node,
-                                Some(key.clone()),
-                                ImageOutcome::Failed,
-                            );
+                            self.fail_image_request(node, final_url.clone());
+                            self.notify_image_settled(node, ImageOutcome::Failed);
                         }
                     }
                 }
@@ -1907,8 +1943,8 @@ impl BaseDocument {
                 let Some(key) = res.image_key.clone() else {
                     return;
                 };
-
-                self.apply_loaded_image(&key, image);
+                let final_url = res.resolved_url.as_deref().and_then(|url| Url::parse(url).ok());
+                self.apply_loaded_image(&key, image, final_url, res.origin_clean);
             }
             #[cfg(feature = "svg")]
             Resource::Svg(_kind, svg) => {
@@ -1918,8 +1954,8 @@ impl BaseDocument {
                 let Some(key) = res.image_key.clone() else {
                     return;
                 };
-
-                self.apply_loaded_image(&key, image);
+                let final_url = res.resolved_url.as_deref().and_then(|url| Url::parse(url).ok());
+                self.apply_loaded_image(&key, image, final_url, res.origin_clean);
             }
             Resource::DocumentSrc(html) => {
                 let Some(node_id) = res.node_id else {
@@ -1974,7 +2010,13 @@ impl BaseDocument {
 
     /// Cache a loaded image and apply it to all nodes waiting on it
     /// (`<img>` elements, `background-image` layers and `mask-image` layers).
-    fn apply_loaded_image(&mut self, key: &ImageKey, image: ImageData) {
+    fn apply_loaded_image(
+        &mut self,
+        key: &ImageKey,
+        image: ImageData,
+        final_url: Option<Url>,
+        origin_clean: bool,
+    ) {
         // Get all nodes waiting for this image
         let waiting_nodes = self.take_pending(key);
 
@@ -1986,10 +2028,10 @@ impl BaseDocument {
         );
 
         // Cache the image
-        self.image_cache
-            .entry(key.url.clone())
-            .or_default()
-            .insert(key.crossorigin, image.clone());
+        self.image_cache.entry(key.url.clone()).or_default().insert(
+            key.crossorigin,
+            CachedImage::new(image.clone(), final_url.clone(), origin_clean),
+        );
 
         // Apply to all waiting nodes
         for (node_id, image_type) in waiting_nodes {
@@ -2009,7 +2051,12 @@ impl BaseDocument {
                     // Clear layout cache
                     node.clear_layout_cache();
                     node.insert_damage(ALL_DAMAGE);
-                    self.notify_image_settled(node_id, Some(key.clone()), ImageOutcome::Loaded);
+                    if let Some(request) = self.image_requests.get_mut(&node_id) {
+                        request.status = ImageRequestStatus::Loaded;
+                        request.final_url = final_url.clone();
+                        request.origin_clean = origin_clean;
+                    }
+                    self.notify_image_settled(node_id, ImageOutcome::Loaded);
                 }
                 ImageType::Background(idx) | ImageType::Mask(idx) | ImageType::Content(idx) => {
                     let layer_image = node.element_data_mut().and_then(|el| {
@@ -2027,6 +2074,18 @@ impl BaseDocument {
                     }
                 }
             }
+        }
+    }
+
+    /// Marks one `<img>`'s request broken: the delivery failed and nothing
+    /// replaced the request while it was in flight. `final_url` is the
+    /// response URL when one arrived (a decode failure), so `currentSrc` still
+    /// reports it (<https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-currentsrc>).
+    fn fail_image_request(&mut self, node: NodeId, final_url: Option<Url>) {
+        if let Some(request) = self.image_requests.get_mut(&node) {
+            request.status = ImageRequestStatus::Failed;
+            request.final_url = final_url;
+            request.origin_clean = false;
         }
     }
 
@@ -4013,6 +4072,7 @@ mod font_face_override_tests {
             node_id: None,
             resolved_url: Some(String::from("test://aliased-family")),
             image_key: None,
+            origin_clean: false,
             result: Ok(Resource::Font(
                 blitz_traits::net::Bytes::from_static(crate::BULLET_FONT),
                 FontFaceOverrides {

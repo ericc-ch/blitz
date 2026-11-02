@@ -101,8 +101,8 @@ pub use blitz_traits::node_id::NodeId;
 pub use config::{DocumentConfig, StyleThreading};
 pub use document::{
     BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document, FocusSource, ImageKey,
-    ImageOutcome, ImageRequestState, ImageSettleObserver, ImageSettlement, PlainDocument,
-    UserAgentStylesheet,
+    ImageOutcome, ImageRequestState, ImageRequestStatus, ImageSettleObserver, ImageSettlement,
+    PlainDocument, UserAgentStylesheet,
 };
 pub use markup5ever::{
     LocalName, Namespace, NamespaceStaticSet, Prefix, PrefixStaticSet, QualName, local_name,

@@ -29,10 +29,25 @@ pub trait NetProvider: Send + Sync + 'static {
     }
 }
 
+/// What a fetch learned about a response beyond its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResponseInfo {
+    /// Whether the response is origin-clean, so canvas may read its pixels
+    /// (<https://html.spec.whatwg.org/multipage/canvas.html#the-image-argument>).
+    pub origin_clean: bool,
+}
+
 /// A type that parses raw bytes from a network request into a Data and then calls
 /// the NetCallack with the result.
 pub trait NetHandler: Send + Sync + 'static {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes);
+
+    /// Delivers a response with the metadata the fetch learned about it. A
+    /// handler that needs the metadata overrides this; the default keeps the
+    /// bytes-only behavior for providers that cannot report it.
+    fn response(self: Box<Self>, resolved_url: String, bytes: Bytes, _info: ResponseInfo) {
+        self.bytes(resolved_url, bytes);
+    }
 }
 
 /// A callback which gets called every time a network request completes

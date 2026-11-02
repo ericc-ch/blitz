@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
-use crate::document::{ImageKey, ImageOutcome, ImageRequestState};
+use crate::document::{ImageKey, ImageOutcome, ImageRequestState, ImageRequestStatus};
 use crate::layout::damage::ALL_DAMAGE;
 use crate::net::{ImageHandler, ResourceHandler};
 use crate::node::{CanvasData, Dirtiness, ImageData, NodeFlags, SpecialElementData};
@@ -1806,6 +1806,9 @@ impl<'doc> DocumentMutator<'doc> {
         let state = ImageRequestState {
             key: key.clone(),
             referrer_policy: referrer_policy.clone(),
+            status: ImageRequestStatus::Pending,
+            final_url: None,
+            origin_clean: false,
         };
         if mutation != ImageMutation::Src
             && self
@@ -1841,7 +1844,7 @@ impl<'doc> DocumentMutator<'doc> {
         node.insert_damage(ALL_DAMAGE);
 
         self.doc
-            .notify_image_settled(target_id, key.clone(), ImageOutcome::Started);
+            .notify_image_settled(target_id, ImageOutcome::Started);
         // An empty attribute, a URL that cannot be resolved, and a source set
         // (`srcset`, or a `<picture>` `<source>`) this engine cannot select
         // from all leave the request broken. A
@@ -1849,11 +1852,14 @@ impl<'doc> DocumentMutator<'doc> {
         // for pixels that will never arrive
         // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
         let Some(src) = src else {
+            if let Some(request) = self.doc.image_requests.get_mut(&target_id) {
+                request.status = ImageRequestStatus::Failed;
+            }
             self.doc
-                .notify_image_settled(target_id, key, ImageOutcome::Failed);
+                .notify_image_settled(target_id, ImageOutcome::Failed);
             return;
         };
-        if let Some(image) = self
+        if let Some(cached) = self
             .doc
             .image_cache
             .get(&src)
@@ -1862,11 +1868,16 @@ impl<'doc> DocumentMutator<'doc> {
         {
             let node = &mut self.doc.nodes[target_id];
             node.element_data_mut().unwrap().special_data =
-                SpecialElementData::Image(Box::new(image));
+                SpecialElementData::Image(Box::new(cached.image));
             node.clear_layout_cache();
             node.insert_damage(ALL_DAMAGE);
+            if let Some(request) = self.doc.image_requests.get_mut(&target_id) {
+                request.status = ImageRequestStatus::Loaded;
+                request.final_url = cached.final_url;
+                request.origin_clean = cached.origin_clean;
+            }
             self.doc
-                .notify_image_settled(target_id, key, ImageOutcome::Loaded);
+                .notify_image_settled(target_id, ImageOutcome::Loaded);
             return;
         }
 
@@ -1876,7 +1887,14 @@ impl<'doc> DocumentMutator<'doc> {
             .get_mut(&src)
             .and_then(|by_crossorigin| by_crossorigin.get_mut(&crossorigin))
         {
-            waiting_list.push((target_id, ImageType::Image));
+            // A restart that keeps the same request key joins the in-flight
+            // request instead of adding a second waiter: one request settles a
+            // node once, so it fires one `load` or `error`
+            // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+            let waiter = (target_id, ImageType::Image);
+            if !waiting_list.contains(&waiter) {
+                waiting_list.push(waiter);
+            }
             return;
         }
 

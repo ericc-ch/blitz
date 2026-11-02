@@ -118,10 +118,13 @@ impl<T: Send + Sync + 'static> ResourceHandler<T> {
     /// names the key it was filed under, because the key also carries the
     /// element's CORS state
     /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
+    /// `origin_clean` is the response taint an image request settles with;
+    /// other resources carry `false` and ignore it.
     fn respond(
         &self,
         resolved_url: Option<String>,
         image_key: Option<crate::document::ImageKey>,
+        origin_clean: bool,
         result: Result<Resource, String>,
     ) {
         let response = ResourceLoadResponse {
@@ -129,6 +132,7 @@ impl<T: Send + Sync + 'static> ResourceHandler<T> {
             node_id: self.node_id,
             resolved_url,
             image_key,
+            origin_clean,
             result,
         };
         let _ = self.tx.send(DocumentEvent::ResourceLoad(response));
@@ -143,6 +147,10 @@ pub struct ResourceLoadResponse {
     pub resolved_url: Option<String>,
     /// The `(url, crossorigin)` key an image request was filed under.
     pub image_key: Option<crate::document::ImageKey>,
+    /// Whether the response is origin-clean, so an image request that settles
+    /// with it carries the taint into canvas
+    /// (<https://html.spec.whatwg.org/multipage/canvas.html#the-image-argument>).
+    pub origin_clean: bool,
     pub result: Result<Resource, String>,
 }
 
@@ -156,7 +164,7 @@ pub struct StylesheetHandler {
 impl NetHandler for ResourceHandler<StylesheetHandler> {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let Ok(css) = std::str::from_utf8(&bytes) else {
-            return self.respond(Some(resolved_url), None, Err(String::from("Invalid UTF8")));
+            return self.respond(Some(resolved_url), None, false, Err(String::from("Invalid UTF8")));
         };
 
         // NOTE(Nico): I don't *think* external stylesheets should have HTML entities escaped
@@ -185,6 +193,7 @@ impl NetHandler for ResourceHandler<StylesheetHandler> {
         self.respond(
             Some(resolved_url),
             None,
+            false,
             Ok(Resource::Css(DocumentStyleSheet(ServoArc::new(sheet)))),
         );
     }
@@ -281,7 +290,7 @@ struct NestedStylesheetHandler {
 impl NetHandler for ResourceHandler<NestedStylesheetHandler> {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let Ok(css) = std::str::from_utf8(&bytes) else {
-            return self.respond(Some(resolved_url), None, Err(String::from("Invalid UTF8")));
+            return self.respond(Some(resolved_url), None, false, Err(String::from("Invalid UTF8")));
         };
 
         // NOTE(Nico): I don't *think* external stylesheets should have HTML entities escaped
@@ -322,6 +331,7 @@ impl NetHandler for ResourceHandler<NestedStylesheetHandler> {
         self.respond(
             Some(resolved_url),
             None,
+            false,
             Ok(Resource::ImportedCss(import_rule, sheet)),
         )
     }
@@ -334,7 +344,7 @@ struct FontFaceHandler {
 impl NetHandler for ResourceHandler<FontFaceHandler> {
     fn bytes(mut self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let result = self.data.parse(bytes);
-        self.respond(Some(resolved_url), None, result)
+        self.respond(Some(resolved_url), None, false, result)
     }
 }
 impl FontFaceHandler {
@@ -586,7 +596,7 @@ pub(crate) struct DocumentSrcHandler;
 impl NetHandler for ResourceHandler<DocumentSrcHandler> {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let html = String::from_utf8_lossy(&bytes).into_owned();
-        self.respond(Some(resolved_url), None, Ok(Resource::DocumentSrc(html)));
+        self.respond(Some(resolved_url), None, false, Ok(Resource::DocumentSrc(html)));
     }
 }
 
@@ -604,9 +614,29 @@ impl ImageHandler {
 }
 
 impl NetHandler for ResourceHandler<ImageHandler> {
-    fn bytes(self: Box<Self>, _resolved_url: String, bytes: Bytes) {
+    fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
+        self.response(
+            resolved_url,
+            bytes,
+            blitz_traits::net::ResponseInfo {
+                origin_clean: true,
+            },
+        );
+    }
+
+    fn response(
+        self: Box<Self>,
+        resolved_url: String,
+        bytes: Bytes,
+        info: blitz_traits::net::ResponseInfo,
+    ) {
         let result = self.data.parse(bytes);
-        self.respond(None, Some(self.data.key.clone()), result)
+        self.respond(
+            Some(resolved_url),
+            Some(self.data.key.clone()),
+            info.origin_clean,
+            result,
+        );
     }
 }
 
