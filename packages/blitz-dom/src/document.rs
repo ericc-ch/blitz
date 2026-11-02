@@ -381,19 +381,13 @@ pub struct BaseDocument {
     #[cfg(feature = "custom-widget")]
     pub(crate) pending_resource_deallocations: Vec<anyrender::ResourceId>,
 
-    /// Cache of loaded images, keyed by URL. Allows reusing images across multiple
-    /// elements without re-fetching from the network.
     /// Decoded images, by request URL and CORS settings state. Two elements on
     /// one URL with different `crossorigin` values are different requests.
-    pub(crate) image_cache:
-        HashMap<String, HashMap<Option<blitz_traits::net::CorsSetting>, ImageData>>,
+    pub(crate) image_cache: HashMap<Url, HashMap<Option<blitz_traits::net::CorsSetting>, ImageData>>,
 
-    /// Tracks in-flight image requests. When an image is being fetched, additional
-    /// requests for the same URL are queued here instead of starting new fetches.
-    /// Value is a list of (node_id, image_type) pairs waiting for the image.
     /// In-flight image requests, keyed like [`BaseDocument::image_cache`].
     pub(crate) pending_images:
-        HashMap<String, HashMap<Option<blitz_traits::net::CorsSetting>, Vec<(NodeId, ImageType)>>>,
+        HashMap<Url, HashMap<Option<blitz_traits::net::CorsSetting>, Vec<(NodeId, ImageType)>>>,
     /// The request each node's image data belongs to, and the referrer policy
     /// it was created with. A new request compares against this to tell an
     /// attribute write that changes the request from one that does not, and
@@ -469,7 +463,7 @@ fn stylesheet_response_origin_clean(document: &url::Url, resolved: &str) -> bool
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ImageKey {
     /// The URL the request was made with.
-    pub url: String,
+    pub url: Url,
     /// The state of the element's `crossorigin` content attribute.
     pub crossorigin: Option<blitz_traits::net::CorsSetting>,
 }
@@ -477,7 +471,11 @@ pub struct ImageKey {
 /// The image request a node's pixels belong to.
 #[derive(Clone, Debug)]
 pub struct ImageRequestState {
-    pub key: ImageKey,
+    /// The request the node's pixels belong to, or `None` when the element's
+    /// source named no absolute URL. A source that cannot be resolved starts
+    /// no request, so there is no URL to key one by; the element is already
+    /// broken and settles without pixels.
+    pub key: Option<ImageKey>,
     /// The element's `referrerpolicy` content attribute value at request
     /// creation, unparsed.
     pub referrer_policy: Option<String>,
@@ -488,7 +486,9 @@ pub struct ImageRequestState {
 #[derive(Clone, Debug)]
 pub struct ImageSettlement {
     pub node: NodeId,
-    pub key: ImageKey,
+    /// The request the outcome belongs to, or `None` for a source that named
+    /// no absolute URL.
+    pub key: Option<ImageKey>,
     pub outcome: ImageOutcome,
 }
 
@@ -538,7 +538,12 @@ impl BaseDocument {
         waiters
     }
 
-    pub(crate) fn notify_image_settled(&self, node: NodeId, key: ImageKey, outcome: ImageOutcome) {
+    pub(crate) fn notify_image_settled(
+        &self,
+        node: NodeId,
+        key: Option<ImageKey>,
+        outcome: ImageOutcome,
+    ) {
         let Some(observer) = self.image_settle.as_ref() else {
             return;
         };
@@ -1844,7 +1849,11 @@ impl BaseDocument {
                     let waiters = self.take_pending(key);
                     for (node, image_type) in waiters {
                         if matches!(image_type, ImageType::Image) {
-                            self.notify_image_settled(node, key.clone(), ImageOutcome::Failed);
+                            self.notify_image_settled(
+                                node,
+                                Some(key.clone()),
+                                ImageOutcome::Failed,
+                            );
                         }
                     }
                 }
@@ -2000,7 +2009,7 @@ impl BaseDocument {
                     // Clear layout cache
                     node.clear_layout_cache();
                     node.insert_damage(ALL_DAMAGE);
-                    self.notify_image_settled(node_id, key.clone(), ImageOutcome::Loaded);
+                    self.notify_image_settled(node_id, Some(key.clone()), ImageOutcome::Loaded);
                 }
                 ImageType::Background(idx) | ImageType::Mask(idx) | ImageType::Content(idx) => {
                     let layer_image = node.element_data_mut().and_then(|el| {
@@ -4003,6 +4012,7 @@ mod font_face_override_tests {
             request_id: 0,
             node_id: None,
             resolved_url: Some(String::from("test://aliased-family")),
+            image_key: None,
             result: Ok(Resource::Font(
                 blitz_traits::net::Bytes::from_static(crate::BULLET_FONT),
                 FontFaceOverrides {

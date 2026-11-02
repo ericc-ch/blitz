@@ -1795,13 +1795,11 @@ impl<'doc> DocumentMutator<'doc> {
             .and_then(|raw| self.doc.resolve_url(raw));
         let crossorigin = node.cors_setting();
         let referrer_policy = node.referrer_policy_attribute();
-        let key = ImageKey {
-            url: src.as_ref().map_or_else(
-                || raw_src.unwrap_or_default().to_owned(),
-                |src| src.as_str().to_owned(),
-            ),
-            crossorigin,
-        };
+        // A source that names no absolute URL starts no request, so its key is
+        // absent: the element is already broken and settles without pixels.
+        let key = src
+            .as_ref()
+            .map(|url| ImageKey { url: url.clone(), crossorigin });
         // HTML restarts the update when `crossorigin` or `referrerpolicy`
         // changes *state*; a write that leaves the state alone does nothing
         // (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
@@ -1826,11 +1824,12 @@ impl<'doc> DocumentMutator<'doc> {
         let previous = self.doc.image_requests.insert(target_id, state);
         if let Some(previous) = previous
             && previous.key != key
+            && let Some(previous_key) = &previous.key
             && let Some(waiters) = self
                 .doc
                 .pending_images
-                .get_mut(&previous.key.url)
-                .and_then(|by_crossorigin| by_crossorigin.get_mut(&previous.key.crossorigin))
+                .get_mut(&previous_key.url)
+                .and_then(|by_crossorigin| by_crossorigin.get_mut(&previous_key.crossorigin))
         {
             waiters.retain(|(node, _)| *node != target_id);
         }
@@ -1857,8 +1856,8 @@ impl<'doc> DocumentMutator<'doc> {
         if let Some(image) = self
             .doc
             .image_cache
-            .get(&key.url)
-            .and_then(|by_crossorigin| by_crossorigin.get(&key.crossorigin))
+            .get(&src)
+            .and_then(|by_crossorigin| by_crossorigin.get(&crossorigin))
             .cloned()
         {
             let node = &mut self.doc.nodes[target_id];
@@ -1874,8 +1873,8 @@ impl<'doc> DocumentMutator<'doc> {
         if let Some(waiting_list) = self
             .doc
             .pending_images
-            .get_mut(&key.url)
-            .and_then(|by_crossorigin| by_crossorigin.get_mut(&key.crossorigin))
+            .get_mut(&src)
+            .and_then(|by_crossorigin| by_crossorigin.get_mut(&crossorigin))
         {
             waiting_list.push((target_id, ImageType::Image));
             return;
@@ -1883,9 +1882,9 @@ impl<'doc> DocumentMutator<'doc> {
 
         self.doc
             .pending_images
-            .entry(key.url.clone())
+            .entry(src.clone())
             .or_default()
-            .insert(key.crossorigin, vec![(target_id, ImageType::Image)]);
+            .insert(crossorigin, vec![(target_id, ImageType::Image)]);
 
         let mut request = self
             .doc
@@ -1898,6 +1897,8 @@ impl<'doc> DocumentMutator<'doc> {
         if let Some(referrer_policy) = referrer_policy {
             request = request.referrer_policy(referrer_policy);
         }
+        // `src` resolved to a URL, so the key is present.
+        let key = key.expect("a resolved source has a key");
         self.doc.net_provider.fetch(
             self.doc.id(),
             request,

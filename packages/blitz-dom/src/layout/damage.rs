@@ -593,7 +593,7 @@ impl BaseDocument {
                     let url_str = new_url.as_str();
                     if let Some(cached_image) = self
                         .image_cache
-                        .get(url_str)
+                        .get(&**new_url)
                         .and_then(|by_crossorigin| by_crossorigin.get(&None))
                     {
                         #[cfg(feature = "tracing")]
@@ -605,7 +605,7 @@ impl BaseDocument {
                         })
                     } else if let Some(waiting_list) = self
                         .pending_images
-                        .get_mut(url_str)
+                        .get_mut(&**new_url)
                         .and_then(|by_crossorigin| by_crossorigin.get_mut(&None))
                     {
                         // Image is already being fetched, queue this node
@@ -618,11 +618,11 @@ impl BaseDocument {
                         #[cfg(feature = "tracing")]
                         tracing::info!("Fetching image {url_str}");
                         self.pending_images
-                            .entry(url_str.to_owned())
+                            .entry((**new_url).clone())
                             .or_default()
                             .insert(None, vec![(node_id, kind.image_type(idx))]);
                         let key = ImageKey {
-                            url: url_str.to_owned(),
+                            url: (**new_url).clone(),
                             crossorigin: None,
                         };
 
