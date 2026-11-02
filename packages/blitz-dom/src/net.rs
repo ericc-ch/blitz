@@ -614,12 +614,17 @@ impl ImageHandler {
 }
 
 impl NetHandler for ResourceHandler<ImageHandler> {
+    /// A provider that only reports bytes cannot say how the response was
+    /// tainted, so the delivery is marked tainted: canvas must not read pixels
+    /// from a request whose origin-cleanliness is unknown
+    /// (<https://html.spec.whatwg.org/multipage/canvas.html#the-image-argument>).
+    /// A provider that knows the taint calls [`NetHandler::response`].
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         self.response(
             resolved_url,
             bytes,
             blitz_traits::net::ResponseInfo {
-                origin_clean: true,
+                origin_clean: false,
             },
         );
     }

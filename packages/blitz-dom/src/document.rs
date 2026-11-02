@@ -235,6 +235,15 @@ pub enum DocumentEvent {
         node_id: NodeId,
         url: Url,
     },
+    /// An image request that failed before any fetch: its source names no
+    /// fetchable URL. Processed on a later turn, so `complete` stays false
+    /// until the failure and error event are due, and tagged with the update
+    /// generation so a newer request on the same element is untouched
+    /// (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+    ImageFailed {
+        node: NodeId,
+        generation: u64,
+    },
 }
 
 pub struct BaseDocument {
@@ -397,6 +406,12 @@ pub struct BaseDocument {
     /// (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
     pub(crate) image_requests: HashMap<NodeId, ImageRequestState>,
 
+    /// The last image update generation handed out. A failure that arrives on a
+    /// later turn carries the generation it belongs to, so a request the
+    /// element started after it is not failed by it
+    /// (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+    pub(crate) image_request_generation: u64,
+
     /// Nodes whose `background-image`/`mask-image` layers need flushing to
     /// dedicated storage on the node because their style changed (populated by
     /// the style traversal and by pseudo-element box construction).
@@ -491,6 +506,11 @@ pub struct ImageRequestState {
     /// Whether the settled pixels are origin-clean for canvas
     /// (<https://html.spec.whatwg.org/multipage/canvas.html#the-image-argument>).
     pub origin_clean: bool,
+    /// Which update-the-image-data run wrote this record. A failure that is
+    /// queued for a later turn carries its generation, so it cannot mark a
+    /// newer request broken
+    /// (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+    pub generation: u64,
 }
 
 /// Where an image request stands.
@@ -543,6 +563,11 @@ pub enum ImageOutcome {
     Loaded,
     /// The request finished without usable pixels.
     Failed,
+    /// The request was aborted because the element has no source left. The
+    /// node is broken and complete, and no event fires: the element has
+    /// neither a `src` nor a source set
+    /// (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+    Aborted,
 }
 
 /// Receives each image request state change for a node: its start, and then
@@ -755,6 +780,7 @@ impl BaseDocument {
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
             image_requests: HashMap::new(),
+            image_request_generation: 0,
             pending_style_image_nodes: Vec::new(),
             image_referrers: HashMap::new(),
             pending_critical_resources: HashSet::new(),
@@ -1850,6 +1876,19 @@ impl BaseDocument {
         match msg {
             DocumentEvent::ResourceLoad(resource) => self.load_resource(resource),
             DocumentEvent::NavigateIframe { node_id, url } => self.navigate_iframe(node_id, url),
+            DocumentEvent::ImageFailed { node, generation } => {
+                // A newer update already replaced this request: the failure
+                // belongs to a request the element no longer has
+                // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
+                if self
+                    .image_requests
+                    .get(&node)
+                    .is_some_and(|request| request.generation == generation)
+                {
+                    self.fail_image_request(node, None);
+                    self.notify_image_settled(node, ImageOutcome::Failed);
+                }
+            }
         }
     }
 

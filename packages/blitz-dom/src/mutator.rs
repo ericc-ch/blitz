@@ -610,6 +610,16 @@ impl DocumentMutator<'_> {
             self.load_image(node_id, ImageMutation::Src);
             return;
         }
+        // A source set is a relevant mutation: it restarts the request only
+        // when the selected source changes, which `load_image` decides by
+        // comparing request keys
+        // (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
+        if (tag, attr) == tag_and_attr!("img", "srcset")
+            || (tag, attr) == tag_and_attr!("img", "sizes")
+        {
+            self.load_image(node_id, ImageMutation::SourceSet);
+            return;
+        }
         if (tag, attr) == tag_and_attr!("img", "crossorigin") {
             self.load_image(node_id, ImageMutation::CrossOrigin);
             return;
@@ -1296,6 +1306,10 @@ impl DocumentMutator<'_> {
 pub(crate) enum ImageMutation {
     Src,
     Insert,
+    /// A `srcset` or `sizes` write: a relevant mutation whose request only
+    /// restarts when the selected source changed
+    /// (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
+    SourceSet,
     CrossOrigin,
     ReferrerPolicy,
 }
@@ -1764,9 +1778,8 @@ impl<'doc> DocumentMutator<'doc> {
     pub(crate) fn load_image(&mut self, target_id: NodeId, mutation: ImageMutation) {
         let node = &self.doc.nodes[target_id];
         let raw_src = node.attr(local_name!("src"));
-        let has_source_set = node
-            .attr(local_name!("srcset"))
-            .is_some_and(|set| !set.trim().is_empty())
+        let raw_srcset = node.attr(local_name!("srcset"));
+        let has_source_set = raw_srcset.is_some_and(|set| !set.trim().is_empty())
             || node.parent.is_some_and(|parent| {
                 self.doc.get_node(parent).is_some_and(|parent| {
                     parent.element_data().is_some_and(|element| {
@@ -1784,15 +1797,64 @@ impl<'doc> DocumentMutator<'doc> {
                     })
                 })
             });
-        // No `src` and no source set is no request at all: the element is
-        // complete without one
+        // No `src` and no source set aborts any request the element already
+        // had: the element is complete without a source, and no event fires
+        // because it has neither a `src` nor a source set
         // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
         if raw_src.is_none() && !has_source_set {
+            let previous = self.doc.image_requests.remove(&target_id);
+            if let Some(previous) = previous {
+                if let Some(previous_key) = previous.key
+                    && let Some(waiters) = self
+                        .doc
+                        .pending_images
+                        .get_mut(&previous_key.url)
+                        .and_then(|by_crossorigin| {
+                            by_crossorigin.get_mut(&previous_key.crossorigin)
+                        })
+                {
+                    waiters.retain(|(node, _)| *node != target_id);
+                }
+                let node = &mut self.doc.nodes[target_id];
+                if let Some(element) = node.element_data_mut() {
+                    element.special_data = SpecialElementData::Image(Box::new(ImageData::None));
+                }
+                node.clear_layout_cache();
+                node.insert_damage(ALL_DAMAGE);
+                self.doc
+                    .notify_image_settled(target_id, ImageOutcome::Aborted);
+            }
             return;
         }
-        let src = raw_src
-            .filter(|src| !src.is_empty())
-            .and_then(|raw| self.doc.resolve_url(raw));
+        // The source set is the `srcset` candidates plus `src` as a 1x
+        // fallback when the set has no 1x entry, and the request uses the one
+        // candidate selection picks
+        // (<https://html.spec.whatwg.org/multipage/images.html#creating-a-source-set-from-attributes>).
+        // A candidate whose URL cannot be resolved cannot be fetched either, so
+        // selection runs over the resolved candidates.
+        let mut candidates = raw_srcset.map(crate::srcset::parse_srcset).unwrap_or_default();
+        if let Some(raw) = raw_src.filter(|src| !src.is_empty())
+            && !candidates.iter().any(|candidate| candidate.density == 1.0)
+        {
+            candidates.push(crate::srcset::ImageCandidate {
+                url: raw.to_owned(),
+                density: 1.0,
+            });
+        }
+        let resolved: Vec<(url::Url, f64)> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                self.doc
+                    .resolve_url(&candidate.url)
+                    .map(|url| (url, candidate.density))
+            })
+            .collect();
+        let densities: Vec<f64> = resolved
+            .iter()
+            .map(|(_, density)| *density)
+            .collect();
+        let src = crate::srcset::choose_density(&densities, self.doc.viewport.scale_f64())
+            .map(|index| resolved[index].0.clone());
         let crossorigin = node.cors_setting();
         let referrer_policy = node.referrer_policy_attribute();
         // A source that names no absolute URL starts no request, so its key is
@@ -1803,12 +1865,14 @@ impl<'doc> DocumentMutator<'doc> {
         // HTML restarts the update when `crossorigin` or `referrerpolicy`
         // changes *state*; a write that leaves the state alone does nothing
         // (<https://html.spec.whatwg.org/multipage/images.html#reacting-to-dom-mutations>).
+        self.doc.image_request_generation = self.doc.image_request_generation.wrapping_add(1);
         let state = ImageRequestState {
             key: key.clone(),
             referrer_policy: referrer_policy.clone(),
             status: ImageRequestStatus::Pending,
             final_url: None,
             origin_clean: false,
+            generation: self.doc.image_request_generation,
         };
         if mutation != ImageMutation::Src
             && self
@@ -1847,16 +1911,15 @@ impl<'doc> DocumentMutator<'doc> {
             .notify_image_settled(target_id, ImageOutcome::Started);
         // An empty attribute, a URL that cannot be resolved, and a source set
         // (`srcset`, or a `<picture>` `<source>`) this engine cannot select
-        // from all leave the request broken. A
-        // broken request fires `error` instead of leaving the element waiting
-        // for pixels that will never arrive
+        // from all leave the request broken. The failure is delivered on a
+        // later turn, so `complete` stays false until the error is due and a
+        // script that reads it right after the write sees a request in flight
         // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
         let Some(src) = src else {
-            if let Some(request) = self.doc.image_requests.get_mut(&target_id) {
-                request.status = ImageRequestStatus::Failed;
-            }
-            self.doc
-                .notify_image_settled(target_id, ImageOutcome::Failed);
+            let _ = self.doc.tx.send(crate::document::DocumentEvent::ImageFailed {
+                node: target_id,
+                generation: self.doc.image_request_generation,
+            });
             return;
         };
         if let Some(cached) = self

@@ -64,6 +64,8 @@ mod scrolling;
 mod selection;
 /// The style sheet each image URL a sheet references belongs to.
 mod sheet_images;
+/// Parsing an `<img srcset>` attribute and choosing a candidate from it.
+pub mod srcset;
 /// Implementations that interact with servo's style engine
 mod stylo;
 mod stylo_device;
