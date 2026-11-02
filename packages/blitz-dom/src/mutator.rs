@@ -218,6 +218,7 @@ impl DocumentMutator<'_> {
     ///
     /// Returns the serialized data it stored, so the embedder's exact-unit
     /// bookkeeping and live ranges use the same string the tree holds.
+    #[must_use]
     pub fn set_processing_instruction_attributes(
         &mut self,
         node_id: NodeId,
