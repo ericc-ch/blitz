@@ -104,6 +104,80 @@ impl CorsSetting {
     }
 }
 
+/// The state of a present `referrerpolicy` content attribute
+/// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
+///
+/// The attribute's missing and invalid value defaults are both the empty
+/// string state, which is `None` where this type is carried: "no policy here,
+/// use the document's". A value that names no keyword is not an error, it is
+/// that same state, so a bad spelling never changes a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReferrerPolicy {
+    /// Send no `Referer`.
+    NoReferrer,
+    /// Send the full URL unless the target is a downgrade.
+    NoReferrerWhenDowngrade,
+    /// Send the origin to every origin.
+    Origin,
+    /// Send the full URL same-origin, the origin cross-origin.
+    OriginWhenCrossOrigin,
+    /// Send the full URL only to the same origin.
+    SameOrigin,
+    /// Send the origin, except on a downgrade.
+    StrictOrigin,
+    /// Send the full URL same-origin, the origin cross-origin, and nothing on
+    /// a downgrade.
+    StrictOriginWhenCrossOrigin,
+    /// Send the full URL to every origin.
+    UnsafeUrl,
+}
+
+impl ReferrerPolicy {
+    /// Parses one content attribute value. Enumerated attribute keywords are
+    /// ASCII case-insensitive and untrimmed, so a padded value names no
+    /// keyword and is the invalid value default.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let keyword = value;
+        let policy = if keyword.eq_ignore_ascii_case("no-referrer") {
+            Self::NoReferrer
+        } else if keyword.eq_ignore_ascii_case("no-referrer-when-downgrade") {
+            Self::NoReferrerWhenDowngrade
+        } else if keyword.eq_ignore_ascii_case("origin") {
+            Self::Origin
+        } else if keyword.eq_ignore_ascii_case("origin-when-cross-origin") {
+            Self::OriginWhenCrossOrigin
+        } else if keyword.eq_ignore_ascii_case("same-origin") {
+            Self::SameOrigin
+        } else if keyword.eq_ignore_ascii_case("strict-origin") {
+            Self::StrictOrigin
+        } else if keyword.eq_ignore_ascii_case("strict-origin-when-cross-origin") {
+            Self::StrictOriginWhenCrossOrigin
+        } else if keyword.eq_ignore_ascii_case("unsafe-url") {
+            Self::UnsafeUrl
+        } else {
+            return None;
+        };
+        Some(policy)
+    }
+
+    /// The canonical keyword the attribute reflects
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#dom-referrerpolicy>).
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::NoReferrer => "no-referrer",
+            Self::NoReferrerWhenDowngrade => "no-referrer-when-downgrade",
+            Self::Origin => "origin",
+            Self::OriginWhenCrossOrigin => "origin-when-cross-origin",
+            Self::SameOrigin => "same-origin",
+            Self::StrictOrigin => "strict-origin",
+            Self::StrictOriginWhenCrossOrigin => "strict-origin-when-cross-origin",
+            Self::UnsafeUrl => "unsafe-url",
+        }
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 /// A request type loosely representing <https://fetch.spec.whatwg.org/#requests>
@@ -128,11 +202,12 @@ pub struct Request {
     /// on one URL with different CORS settings are different requests
     /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#cors-settings-attributes>).
     pub crossorigin: Option<CorsSetting>,
-    /// The raw `referrerpolicy` content attribute value of the element that
-    /// initiated the request, sampled when the request was created. HTML
-    /// samples it with the CORS state; the embedder owns the keyword rule
+    /// The `referrerpolicy` state of the element that initiated the request,
+    /// sampled when the request was created. HTML samples it with the CORS
+    /// state, and the request's restart check compares the state, not the
+    /// attribute spelling
     /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
-    pub referrer_policy: Option<String>,
+    pub referrer_policy: Option<ReferrerPolicy>,
     /// The CSS style sheet responsible for this request, when one is: the
     /// sheet's location is the request's referrer, and its response's
     /// `Referrer-Policy` is the request's policy
@@ -197,9 +272,9 @@ impl Request {
         self
     }
 
-    /// Marks the raw `referrerpolicy` content attribute value of the element
-    /// that initiated the request, sampled when the request was created.
-    pub fn referrer_policy(mut self, value: String) -> Self {
+    /// Marks the `referrerpolicy` state of the element that initiated the
+    /// request, sampled when the request was created.
+    pub fn referrer_policy(mut self, value: ReferrerPolicy) -> Self {
         self.referrer_policy = Some(value);
         self
     }

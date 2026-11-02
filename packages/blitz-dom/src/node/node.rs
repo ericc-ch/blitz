@@ -1221,10 +1221,10 @@ impl Node {
         self.element_data()?.cors_setting()
     }
 
-    /// The element's raw `referrerpolicy` value
+    /// The element's `referrerpolicy` state
     /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
-    pub fn referrer_policy_attribute(&self) -> Option<String> {
-        self.element_data()?.referrer_policy_attribute()
+    pub fn referrer_policy(&self) -> Option<blitz_traits::net::ReferrerPolicy> {
+        self.element_data()?.referrer_policy()
     }
 
     pub fn primary_styles(&self) -> Option<impl Deref<Target = ServoArc<ComputedValues>>> {

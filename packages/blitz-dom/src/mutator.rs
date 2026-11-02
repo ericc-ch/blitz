@@ -1939,7 +1939,7 @@ impl<'doc> DocumentMutator<'doc> {
         let src = crate::srcset::choose_density(&densities, self.doc.viewport.scale_f64())
             .map(|index| resolved[index].0.clone());
         let crossorigin = node.cors_setting();
-        let referrer_policy = node.referrer_policy_attribute();
+        let referrer_policy = node.referrer_policy();
         // A source that names no absolute URL starts no request, so its key is
         // absent: the element is already broken and settles without pixels.
         let key = src
@@ -1972,7 +1972,7 @@ impl<'doc> DocumentMutator<'doc> {
         // image data is unavailable until it settles
         // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
         let previous = self.doc.image_requests.insert(target_id, state);
-        if let Some(previous) = previous
+        if let Some(previous) = previous.as_ref()
             && previous.key != key
             && let Some(previous_key) = &previous.key
             && let Some(waiters) = self
@@ -2033,22 +2033,41 @@ impl<'doc> DocumentMutator<'doc> {
             .get_mut(&src)
             .and_then(|by_crossorigin| by_crossorigin.get_mut(&crossorigin))
         {
-            // A restart that keeps the same request key joins the in-flight
-            // request instead of adding a second waiter: one request settles a
-            // node once, so it fires one `load` or `error`
+            // A restart that selects the request the node is already waiting on
+            // joins it: one request settles a node once, so it fires one `load`
+            // or `error`. A restart that changes the request (a new
+            // `referrerpolicy` state on the same URL) starts a new fetch, or the
+            // in-flight request's sampled policy would stand for a request the
+            // page has already replaced
             // (<https://html.spec.whatwg.org/multipage/images.html#updating-the-image-data>).
             let waiter = (target_id, ImageType::Image);
-            if !waiting_list.contains(&waiter) {
-                waiting_list.push(waiter);
+            let same_request = previous.as_ref().is_none_or(|previous| {
+                // This node had no request for this key yet: it joins the one
+                // another element already started. Otherwise the same key and
+                // the same policy is the same request.
+                previous.key != key || previous.referrer_policy == referrer_policy
+            });
+            if same_request {
+                if !waiting_list.contains(&waiter) {
+                    waiting_list.push(waiter);
+                }
+                return;
             }
-            return;
         }
 
-        self.doc
+        // `previous` named the request this node was waiting on; a request that
+        // differs leaves that one's waiter list and joins this one.
+        let waiters = self
+            .doc
             .pending_images
             .entry(src.clone())
             .or_default()
-            .insert(crossorigin, vec![(target_id, ImageType::Image)]);
+            .entry(crossorigin)
+            .or_default();
+        let waiter = (target_id, ImageType::Image);
+        if !waiters.contains(&waiter) {
+            waiters.push(waiter);
+        }
 
         let mut request = self
             .doc

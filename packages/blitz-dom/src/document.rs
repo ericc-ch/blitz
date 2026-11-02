@@ -543,9 +543,10 @@ pub struct ImageRequestState {
     /// no request, so there is no URL to key one by; the element is already
     /// broken and settles without pixels.
     pub key: Option<ImageKey>,
-    /// The element's `referrerpolicy` content attribute value at request
-    /// creation, unparsed.
-    pub referrer_policy: Option<String>,
+    /// The element's `referrerpolicy` state at request creation. It is parsed,
+    /// so a write that changes only the spelling does not restart the request
+    /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
+    pub referrer_policy: Option<blitz_traits::net::ReferrerPolicy>,
     /// Whether the request is waiting for pixels, and if not, what it settled
     /// as. This is the element's one request record: `currentSrc`, `complete`,
     /// `naturalWidth`, and `drawImage` read it instead of keeping copies
@@ -1549,7 +1550,7 @@ impl BaseDocument {
             if let Some(setting) = node.cors_setting() {
                 request = request.crossorigin(setting);
             }
-            if let Some(policy) = node.referrer_policy_attribute() {
+            if let Some(policy) = node.referrer_policy() {
                 request = request.referrer_policy(policy);
             }
         }

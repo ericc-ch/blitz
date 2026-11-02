@@ -617,11 +617,13 @@ impl ElementData {
             .map(blitz_traits::net::CorsSetting::parse)
     }
 
-    /// The element's raw `referrerpolicy` value, sampled when a request is
-    /// created
+    /// The element's `referrerpolicy` state, sampled when a request is
+    /// created. A present value that names no keyword is the same state as an
+    /// absent one, so it never changes a request
     /// (<https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute>).
-    pub fn referrer_policy_attribute(&self) -> Option<String> {
-        self.attr(local_name!("referrerpolicy")).map(str::to_owned)
+    pub fn referrer_policy(&self) -> Option<blitz_traits::net::ReferrerPolicy> {
+        self.attr(local_name!("referrerpolicy"))
+            .and_then(blitz_traits::net::ReferrerPolicy::parse)
     }
 
     pub fn attr_parsed<T: FromStr>(&self, name: impl PartialEq<LocalName>) -> Option<T> {
