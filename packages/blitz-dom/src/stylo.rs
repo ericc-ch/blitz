@@ -246,9 +246,7 @@ impl crate::document::BaseDocument {
             snapshot_map: &self.snapshots,
             registered_speculative_painters: &RegisteredPaintersImpl,
         };
-        // Drop the style context (and the sequential tasks it queued) while
-        // the layout thread state is still set: `SequentialTaskList::drop`
-        // asserts that state, and the tasks must run before it clears.
+        // The thread-local context's sequential task list asserts the LAYOUT state when dropped
         let styles = {
             let mut thread_local = ThreadLocalStyleContext::new();
             let mut context = StyleContext {
@@ -558,7 +556,8 @@ impl selectors::Element for BlitzNode<'_> {
 
             NonTSPseudoClass::InRange => false,
             NonTSPseudoClass::Modal => false,
-            NonTSPseudoClass::Open => false,
+            NonTSPseudoClass::MozInert => self.element_state().contains(ElementState::INERT),
+            NonTSPseudoClass::Open => self.element_state().contains(ElementState::OPEN),
             NonTSPseudoClass::Optional => false,
             NonTSPseudoClass::OutOfRange => false,
             NonTSPseudoClass::PopoverOpen => false,
@@ -816,7 +815,12 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
-        self.try_stylo_element_data().and_then(|s| s.get())
+        // Stylo reads the existence of element data as "has been styled" (its invalidator
+        // unwraps the primary style of every element with data it descends into), but an
+        // element here can carry data before it has styles.
+        self.try_stylo_element_data()
+            .and_then(|s| s.get())
+            .filter(|data| data.styles.primary.is_some())
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {

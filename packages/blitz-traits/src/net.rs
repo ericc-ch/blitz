@@ -48,6 +48,9 @@ pub trait NetHandler: Send + Sync + 'static {
     fn response(self: Box<Self>, resolved_url: String, bytes: Bytes, _info: ResponseInfo) {
         self.bytes(resolved_url, bytes);
     }
+
+    /// Called when fetching fails, including HTTP error statuses and cancellation.
+    fn error(self: Box<Self>, _url: String, _error: String) {}
 }
 
 /// A callback which gets called every time a network request completes

@@ -594,6 +594,7 @@ impl ElementData {
 
         // A newly built control has no child text yet.
         data.sync_placeholder_shown(true);
+        data.flush_open_state();
 
         data
     }
@@ -845,6 +846,14 @@ impl ElementData {
         if self.is_link() {
             self.element_state.insert(ElementState::UNVISITED);
         }
+    }
+
+    pub fn flush_open_state(&mut self) {
+        let is_open = matches!(
+            self.name.local,
+            local_name!("details") | local_name!("dialog")
+        ) && self.has_attr(local_name!("open"));
+        self.element_state.set(ElementState::OPEN, is_open);
     }
 
     pub fn image_data(&self) -> Option<&ImageData> {
@@ -1124,8 +1133,11 @@ impl ElementData {
     }
 
     #[cfg(feature = "custom-widget")]
-    pub fn set_custom_widget(&mut self, widget: Box<dyn crate::Widget>) {
+    pub fn set_custom_widget(&mut self, mut widget: Box<dyn crate::Widget>) {
         use crate::node::custom_widget::CustomWidgetData;
+        for attr in self.attrs.iter() {
+            widget.attribute_changed(&attr.name.local, None, Some(&attr.value));
+        }
         self.special_data = SpecialElementData::CustomWidget(CustomWidgetData::new(widget));
     }
 
