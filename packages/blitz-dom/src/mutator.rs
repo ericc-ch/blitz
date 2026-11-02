@@ -1018,7 +1018,14 @@ impl DocumentMutator<'_> {
     /// only need restyling where its selector flags record a selector that depends on them.
     fn restyle_for_child_list_change(&mut self, parent_id: NodeId, changed: Range<usize>) {
         let parent = &self.doc.nodes[parent_id];
-        let flags = parent.selector_flags().get();
+        let flags = match &parent.data {
+            NodeData::Element(_) | NodeData::AnonymousBlock(_) | NodeData::Document(_) => {
+                parent.selector_flags().get()
+            }
+            // A shadow root or a fragment has no selector flags: no selector
+            // can make it a subject, so only the dirty marking below matters.
+            _ => ElementSelectorFlags::empty(),
+        };
         let mut hint = RestyleHint::empty();
         if flags.intersects(
             ElementSelectorFlags::HAS_EMPTY_SELECTOR
