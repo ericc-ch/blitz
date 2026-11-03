@@ -433,7 +433,7 @@ pub(crate) fn handle_pointerdown(
                     AbsoluteAxis::Vertical => y,
                 },
             });
-            doc.shell_provider.request_redraw();
+            doc.request_redraw();
             return;
         }
     }
@@ -504,7 +504,7 @@ pub(crate) fn handle_pointerdown(
             // Handle text selection for non-input elements
             if let Some((inline_root_id, byte_offset)) = doc.find_text_position(x, y) {
                 doc.set_text_selection(inline_root_id, byte_offset, inline_root_id, byte_offset);
-                doc.shell_provider.request_redraw();
+                doc.request_redraw();
             } else {
                 doc.clear_text_selection();
             }
@@ -585,7 +585,7 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     // restart its fade-out delay now that the drag no longer holds it shown
     if let DragMode::ScrollbarDrag(state) = &drag_mode {
         doc.show_scrollbars(state.scrollbar.node_id);
-        doc.shell_provider.request_redraw();
+        doc.request_redraw();
     }
 
     let time_ms = SystemTime::now()
@@ -596,7 +596,7 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     if let DragMode::Panning(state) = &drag_mode {
         if let Some(fling) = state.generate_fling(time_ms) {
             doc.scroll_animation = ScrollAnimationState::Fling(fling);
-            doc.shell_provider.request_redraw();
+            doc.request_redraw();
         }
     }
 
@@ -847,6 +847,6 @@ pub(crate) fn handle_wheel<F: FnMut(DomEvent)>(
         &mut dispatch_event,
     );
     if has_changed {
-        doc.shell_provider.request_redraw();
+        doc.request_redraw();
     }
 }

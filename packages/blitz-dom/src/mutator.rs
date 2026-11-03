@@ -91,7 +91,7 @@ impl Drop for DocumentMutator<'_> {
     fn drop(&mut self) {
         self.flush(); // Defined at bottom of file
         if self.mutations_occurred {
-            self.doc.shell_provider.request_redraw();
+            self.doc.request_redraw();
         }
     }
 }

@@ -130,10 +130,10 @@ impl BaseDocument {
                 // The snapshot records the pre-change state. Ancestors have to
                 // be dirty or the style traversal never reaches this control.
                 self.nodes[node_id].mark_ancestors_dirty();
-                self.shell_provider.request_redraw();
+                self.request_redraw();
             }
             GeneratedTextInputEvent::Select | GeneratedTextInputEvent::PreEditChange => {
-                self.shell_provider.request_redraw();
+                self.request_redraw();
             }
             GeneratedTextInputEvent::Submit => {
                 // TODO: Generate submit event that can be handled by script

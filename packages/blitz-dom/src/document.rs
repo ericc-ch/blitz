@@ -313,6 +313,13 @@ pub struct BaseDocument {
     /// last [`resolve`](Self::resolve), to be applied (coalesced into a single
     /// device rebuild) at the start of the next resolve.
     pub(crate) pending_device_changes: DeviceChanges,
+    /// Whether style or layout is known to be stale. Set wherever the tree,
+    /// the stylesheets, or the device that styles are resolved against change;
+    /// cleared at the start of the resolve pass that consumes the change.
+    /// An embedder uses [`Self::needs_resolve`] to skip a `resolve` when
+    /// nothing changed, so several mutations between renders cost one settle
+    /// rather than one per mutation.
+    pub(crate) needs_resolve: bool,
     /// Strategy for Stylo's style traversal during `resolve`.
     pub(crate) style_threading: StyleThreading,
     /// Whether incremental layout is enabled for this document. When disabled,
@@ -673,6 +680,32 @@ impl BaseDocument {
         self.font_ctx.clone()
     }
 
+    /// Whether style or layout is stale, so the next [`Self::resolve`] would
+    /// change the rendered tree. An embedder skips the resolve when this is
+    /// false, which lets several mutations between two paints settle once.
+    pub fn needs_resolve(&self) -> bool {
+        self.needs_resolve
+    }
+
+    /// Records that style or layout is stale. Every path that invalidates the
+    /// tree calls this in addition to requesting a redraw, so a paint driven
+    /// by something other than a DOM mutation (an animation frame, a scroll)
+    /// does not force a resolve that has no work to do.
+    pub fn mark_needs_resolve(&mut self) {
+        self.needs_resolve = true;
+    }
+
+    /// Asks the shell for a frame and records that the tree changed, so the
+    /// frame that answers the request resolves style and layout. Document-side
+    /// invalidation paths call this instead of the shell directly, so they
+    /// cannot ask for the frame and forget the resolve. A provider that only
+    /// holds the shell handle (a fetch response) marks the document when
+    /// `handle_messages` delivers the arrival.
+    pub(crate) fn request_redraw(&mut self) {
+        self.needs_resolve = true;
+        self.shell_provider.request_redraw();
+    }
+
     /// Create a new (empty) [`BaseDocument`] with the specified configuration
     pub fn new(config: DocumentConfig) -> Self {
         init_stylo_prefs();
@@ -759,6 +792,8 @@ impl BaseDocument {
             viewport,
             media_type,
             pending_device_changes: DeviceChanges::empty(),
+            // The initial parse populated the tree before any resolve ran.
+            needs_resolve: true,
             style_threading: config.style_threading,
             incremental_layout: config.incremental.unwrap_or(true),
             subdocument_depth: config.subdocument_depth,
@@ -1047,7 +1082,7 @@ impl BaseDocument {
         }
         drop(mutator);
 
-        self.shell_provider.request_redraw();
+        self.request_redraw();
     }
 
     /// The quirks mode style matching and author stylesheets use.
@@ -1079,6 +1114,7 @@ impl BaseDocument {
         );
         if did_change {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
+            self.needs_resolve = true;
         }
     }
 
@@ -1093,6 +1129,7 @@ impl BaseDocument {
         );
         if did_change {
             node.set_restyle_hint(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
+            self.needs_resolve = true;
         }
     }
 
@@ -1777,6 +1814,7 @@ impl BaseDocument {
         // this with the response URL's origin-clean flag before script runs
         // (<https://drafts.csswg.org/cssom/#concept-css-style-sheet-origin-clean-flag>).
         self.retain_cssom_sheet(stylesheet.clone(), node_id, true);
+        self.needs_resolve = true;
         let old = self.nodes_to_stylesheet.insert(node_id, stylesheet.clone());
         self.stylesheet_generation += 1;
 
@@ -1882,6 +1920,11 @@ impl BaseDocument {
         let rx = self.rx.take().unwrap();
 
         while let Ok(msg) = rx.try_recv() {
+            // A resource arrival (a stylesheet, an image, a failed request)
+            // changes style or layout. Mark the document stale even when the
+            // handler itself has no message-specific invalidation, so a paint
+            // never runs against the state from before the arrival.
+            self.needs_resolve = true;
             self.handle_message(msg);
         }
 
@@ -2406,7 +2449,7 @@ impl BaseDocument {
                 });
             }
             self.focus_node_id = None;
-            self.shell_provider.request_redraw();
+            self.request_redraw();
         }
     }
 
@@ -2493,7 +2536,7 @@ impl BaseDocument {
         // The focus is styled (:focus, :focus-visible, :focus-within), so
         // moving it changes what is on screen. Nothing else asks for the
         // frame: a keyboard focus change touches no layout and no content.
-        self.shell_provider.request_redraw();
+        self.request_redraw();
 
         true
     }
@@ -2676,7 +2719,7 @@ impl BaseDocument {
         self.hover_node_id = hover_node_id;
 
         // Request redraw
-        self.shell_provider.request_redraw();
+        self.request_redraw();
 
         true
     }
@@ -2700,7 +2743,7 @@ impl BaseDocument {
         self.hover_node_is_text = false;
 
         // Request redraw
-        self.shell_provider.request_redraw();
+        self.request_redraw();
 
         true
     }
@@ -2856,7 +2899,7 @@ impl BaseDocument {
             return;
         }
         self.pending_device_changes |= changes;
-        self.shell_provider.request_redraw();
+        self.request_redraw();
     }
 
     /// Apply any pending device changes to the stylist, coalescing all changes
@@ -3380,7 +3423,7 @@ impl BaseDocument {
 
         if let Some((node, offset)) = self.find_text_position(x, y) {
             self.update_selection_focus(node, offset);
-            self.shell_provider.request_redraw();
+            self.request_redraw();
             true
         } else {
             false

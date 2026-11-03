@@ -79,6 +79,12 @@ impl BaseDocument {
         // accumulated since the last resolve as a single device rebuild.
         self.flush_pending_device_changes();
 
+        // This pass now consumes every invalidation recorded so far, including
+        // the scale-change invalidation the flush above can raise. A change
+        // made *during* the rest of the pass (hover re-resolution, a message
+        // handled mid-resolve) sets the flag again for the next pass.
+        self.needs_resolve = false;
+
         // we need to resolve stylist first since it will need to drive our layout bits
         self.resolve_stylist(current_time_for_animations);
         timer.record_time("style");
@@ -164,6 +170,12 @@ impl BaseDocument {
         }
         self.subdoc_is_animating = subdoc_is_animating;
         timer.record_time("subdocs");
+
+        // An animation or a smooth scroll needs another pass even though no
+        // mutation will ask for one; the frame loop calls resolve directly.
+        if self.is_animating() {
+            self.needs_resolve = true;
+        }
 
         timer.print_times(&format!("Resolve({}): ", self.id()));
     }

@@ -182,7 +182,7 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
         DomEventData::PointerMove(event) => {
             let changed = handle_pointermove(doc, target_node_id, event, dispatch_event);
             if changed {
-                doc.shell_provider.request_redraw();
+                doc.request_redraw();
             }
         }
         DomEventData::MouseMove(_) => {

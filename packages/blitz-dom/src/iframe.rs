@@ -111,7 +111,7 @@ impl BaseDocument {
             .clone()
             .parse_document(html, config);
         self.set_sub_document(node_id, sub_doc);
-        self.shell_provider.request_redraw();
+        self.request_redraw();
     }
 
     /// Attach a sub-document parsed from the iframe's `srcdoc` attribute.

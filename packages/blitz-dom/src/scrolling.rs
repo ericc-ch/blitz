@@ -314,7 +314,7 @@ impl BaseDocument {
                     dispatch_event(DomEvent::new(root_id, DomEventData::Scroll(event)));
                 }
 
-                self.shell_provider.request_redraw();
+                self.request_redraw();
                 true
             }
             ScrollTarget::Node(node_id) => {
@@ -343,7 +343,7 @@ impl BaseDocument {
                 dispatch_event(DomEvent::new(node_id, DomEventData::Scroll(event)));
 
                 self.show_scrollbars(node_id);
-                self.shell_provider.request_redraw();
+                self.request_redraw();
                 true
             }
         }
@@ -525,7 +525,7 @@ impl BaseDocument {
         });
 
         // Ensure the frame loop runs so the animation is driven to completion.
-        self.shell_provider.request_redraw();
+        self.request_redraw();
     }
 
     fn should_scroll_smoothly(&self, target: ScrollTarget, behavior: ScrollBehavior) -> bool {

@@ -504,6 +504,7 @@ pub(crate) fn sort_layout_children_by_order(
 
 impl BaseDocument {
     pub(crate) fn invalidate_inline_contexts(&mut self) {
+        self.needs_resolve = true;
         let scale = self.viewport.scale();
 
         let font_ctx = &self.font_ctx;
