@@ -1170,7 +1170,7 @@ impl ElementData {
             return false;
         }
         let type_attr = self.attr(local_name!("type"));
-        let is_submit = type_attr == Some("submit");
+        let is_submit = type_attr.is_some_and(|kind| kind.eq_ignore_ascii_case("submit"));
         let is_auto_submit = type_attr.is_none()
             && self.attr(LocalName::from("command")).is_none()
             && self.attr(LocalName::from("commandfor")).is_none();

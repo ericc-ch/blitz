@@ -45,7 +45,8 @@ mod cssom;
 mod debug;
 mod events;
 mod font_metrics;
-mod form;
+/// Form owners, entry lists, and submission planning.
+pub mod form;
 mod html;
 /// Loading of `<iframe>` elements into sub-documents.
 mod iframe;
