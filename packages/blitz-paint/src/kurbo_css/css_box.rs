@@ -648,18 +648,10 @@ fn start_angle(bt_width: f64, br_width: f64, radii: Vec2) -> f64 {
     This form is well behaved for all k >= 0 (in particular around k == 2,
     which occurs for perfectly ordinary elliptical corners, e.g. a 80px/30px
     radius with 40px/10px border widths), always yielding t in [0, π/2].
-
-    `w = bt_width / br_width`, so a side whose border width is zero takes the
-    ratio to zero or infinity. Evaluating those as limits keeps the returned
-    angle finite: when the side measured by `bt_width` has no border it owns the
-    whole corner (`t -> π/2`), when the side measured by `br_width` has no
-    border the other side owns it (`t -> 0`), and when both are zero the quarter
-    arc is halved.
     */
 
-    // k = radii.y / (w * radii.x), rearranged so that a zero width becomes a
-    // zero or infinite k instead of a NaN. The limits are evaluated directly
-    // because sqrt(infinity) / (sqrt(infinity) + sqrt(2)) is itself NaN.
+    // A zero border width is a limit of the ratio, where the rearranged form is
+    // 0/0 or NaN, so evaluate the limits directly.
     let k = if br_width == 0.0 {
         if bt_width == 0.0 {
             return FRAC_PI_4;
@@ -811,11 +803,8 @@ mod tests {
     }
 
     /// A corner with a zero border width on one or both sides has no sharp
-    /// colour boundary; the split angle has to fall out as a finite limit
-    /// rather than `0 / 0`. `bt_width` is the width of the side that the arc
-    /// sweeps from, so an absent `bt` side means the split sits at the end of
-    /// that side's half of the quarter arc, and an absent `br` side puts the
-    /// split at its start.
+    /// colour boundary, so the split angle has to fall out as a finite limit
+    /// rather than `0 / 0`.
     #[test]
     fn start_angle_handles_zero_border_widths() {
         let radii = Vec2::new(10.0, 10.0);

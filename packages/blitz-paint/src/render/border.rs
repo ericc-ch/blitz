@@ -318,13 +318,9 @@ impl ElementCx<'_, '_> {
             return;
         }
 
-        // Fill every edge of the same colour as one path, in the order the first
-        // edge of that colour appears. Painting in edge order keeps the
-        // anti-aliasing along a corner shared by two different-coloured edges the
-        // same as painting the sides one by one: the later side wins the shared
-        // pixel. Collecting all edges of one colour into a single fill avoids a
-        // seam where same-coloured sides meet, because two partial coverages of
-        // the same colour composited one after the other would lighten the join.
+        // Paint in first-appearance edge order so the later side wins a shared
+        // corner pixel, and fill each colour once so a same-coloured join is not
+        // composited twice and lightened.
         let mut groups: SmallVec<[(Color, BezPath); 8]> = SmallVec::new();
         for (color, path) in borders {
             match groups.iter_mut().find(|(group, _)| *group == color) {

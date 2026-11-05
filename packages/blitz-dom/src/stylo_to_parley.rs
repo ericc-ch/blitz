@@ -416,9 +416,8 @@ pub(crate) fn style(
     let font_styles = style.get_font();
     let itext_styles = style.get_inherited_text();
 
-    // Convert font size and line height. Used lengths saturate like the layout
-    // ones: an enormous zoom can make `em`-based spacing exceed what the line
-    // breaker's `f32` arithmetic can carry.
+    // Convert font size and line height, saturating like layout does
+    // (see `MAX_USED_LENGTH_PX`).
     let font_size = stylo_taffy::convert::saturating_px(font_styles.font_size.used_size.0.px());
     let line_height = match font_styles.line_height {
         stylo::LineHeight::Normal => parley::LineHeight::NORMAL,

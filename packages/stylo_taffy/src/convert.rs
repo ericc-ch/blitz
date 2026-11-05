@@ -71,13 +71,10 @@ use taffy::style_helpers::*;
 /// The largest used length, in CSS pixels, that layout carries.
 ///
 /// Blink's `LayoutUnit` saturates at `2^25` px and every used length passes
-/// through it. Stylo computes used lengths in `f32` instead, and a large enough
-/// `zoom` or `em` value overflows the box-model arithmetic: padding can reach
-/// `1e26` px, and `available_width - left_inset - right_inset` then becomes
-/// `NaN`, which the engines below (Taffy's float context, Parley's line
-/// breaker) treat as a broken invariant and abort on. Saturating here, at the
-/// one boundary where Stylo used values become Taffy and Blitz layout values,
-/// mirrors the browser and keeps the arithmetic finite.
+/// through it. Stylo computes used lengths in `f32` instead, where a large
+/// enough `zoom` or `em` overflows the box-model arithmetic into `NaN`, which
+/// Taffy's float context and Parley's line breaker abort on. Saturating at this
+/// boundary keeps that arithmetic finite.
 pub const MAX_USED_LENGTH_PX: f32 = (1 << 25) as f32;
 
 /// Saturation for used lengths; see [`MAX_USED_LENGTH_PX`].

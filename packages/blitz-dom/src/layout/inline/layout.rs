@@ -36,11 +36,9 @@ fn subtract_margins(mut child_inputs: LayoutInput, margin: taffy::Rect<f32>) -> 
     child_inputs
 }
 
-/// The line advance Parley can be given: the content slot left by floats, clamped to the layout
-/// advance. A content slot is narrower than zero when the box's own padding and border exceed
-/// its containing block, and Parley's line breaker asserts
-/// `line_max_advance <= layout_max_advance`, so the narrower side has to be represented as an
-/// empty line instead of a negative one.
+/// The line advance Parley can be given: the slot left by floats, clamped to the layout advance.
+/// Parley asserts `line_max_advance <= layout_max_advance`, and an over-padded box leaves a
+/// negative slot that only an empty line can represent.
 #[cfg(feature = "floats")]
 fn slot_line_advance(slot_width: f32, scale: f32, layout_advance: f32) -> f32 {
     let advance = slot_width * scale;
@@ -629,12 +627,8 @@ impl LayoutPassState<'_> {
                     .maybe_clamp(min_width, max_width)
                     - pbw
             })
-            // The content box cannot be narrower than empty. A specified width smaller than the
-            // box's own padding and border (border-box sizing) otherwise leaves a negative used
-            // width, and Parley's line breaker requires the line advance it is given not to
-            // exceed the layout advance, so a negative layout advance is not representable
-            // downstream. Blink floors the content width at zero the same way
-            // (`LayoutBox::ComputeContentBoxLogicalWidth`).
+            // Blink floors the content box at zero (`ComputeContentBoxLogicalWidth`);
+            // border-box sizing can otherwise leave a negative width.
             .max(0.0);
 
         #[cfg(not(feature = "floats"))]
@@ -1227,4 +1221,20 @@ impl LayoutPassState<'_> {
 #[inline(always)]
 fn f32_max(a: f32, b: f32) -> f32 {
     a.max(b)
+}
+
+#[cfg(all(test, feature = "floats"))]
+mod tests {
+    use super::slot_line_advance;
+
+    /// A negative, non-finite, or over-wide slot must come out as a line advance
+    /// Parley accepts. Removing either clamp or the finiteness check fails this.
+    #[test]
+    fn slot_line_advance_clamps_to_the_layout_advance() {
+        assert_eq!(slot_line_advance(100.0, 1.0, 200.0), 100.0);
+        assert_eq!(slot_line_advance(300.0, 1.0, 200.0), 200.0);
+        assert_eq!(slot_line_advance(-50.0, 1.0, 200.0), 0.0);
+        assert_eq!(slot_line_advance(f32::NAN, 1.0, 200.0), 0.0);
+        assert_eq!(slot_line_advance(f32::INFINITY, 1.0, 200.0), 0.0);
+    }
 }
