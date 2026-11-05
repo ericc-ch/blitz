@@ -9,7 +9,6 @@ use crate::{document::BaseDocument, dom_node_id, node::Node, taffy_node_id};
 use markup5ever::{LocalName, local_name};
 use std::cell::Ref;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use style::Atom;
 use style::values::computed::CSSPixelLength;
 use style::values::computed::length_percentage::CalcLengthPercentage;
@@ -486,7 +485,19 @@ impl LayoutPassState<'_> {
                                 default_object_size,
                             )
                         }
-                        _ => unreachable!(),
+                        // Not replaced content: such an element's intrinsic
+                        // size comes from its tag alone. None of these can be
+                        // attached to the replaced tags above, but the enum is
+                        // closed and a panic here would abort the process.
+                        SpecialElementData::Stylesheet(_)
+                        | SpecialElementData::TextInput(_)
+                        | SpecialElementData::CheckboxInput => {
+                            tag_intrinsic_sizes(&element_data.name.local, attr_size)
+                        }
+                        #[cfg(feature = "file-input")]
+                        SpecialElementData::FileInput(_) => {
+                            tag_intrinsic_sizes(&element_data.name.local, attr_size)
+                        }
                     };
 
                     #[cfg(feature = "writing-mode")]
@@ -539,15 +550,15 @@ impl LayoutPassState<'_> {
                             inputs.available_space.maybe_min(max_available_space);
                     }
 
-                    let SpecialElementData::TableRoot(context) = &self.nodes[dom_node_id(node_id)]
+                    let Some(context) = self.nodes[dom_node_id(node_id)]
                         .data
                         .downcast_element()
                         .unwrap()
-                        .special_data
+                        .table_root
+                        .clone()
                     else {
                         panic!("Node marked as table root but doesn't have TableContext");
                     };
-                    let context = Arc::clone(context);
 
                     let mut table_wrapper = TableTreeWrapper {
                         doc: self,

@@ -555,15 +555,18 @@ fn collect_layout_children_with_wrap(
         DisplayInside::Table => {
             let (table_context, tlayout_children) = build_table_context(doc, container_node_id);
             #[allow(clippy::arc_with_non_send_sync)]
-            let data = SpecialElementData::TableRoot(Arc::new(table_context));
+            let context = Arc::new(table_context);
             doc.nodes[container_node_id]
                 .flags
                 .insert(NodeFlags::IS_TABLE_ROOT);
+            // A table box can be a replaced element too (`display: table` on a
+            // canvas or image), so this cannot live in `special_data`: it would
+            // destroy the replaced content.
             doc.nodes[container_node_id]
                 .data
                 .downcast_element_mut()
                 .unwrap()
-                .special_data = data;
+                .table_root = Some(context);
             if let Some(before) = doc.nodes[container_node_id].before() {
                 out.push(before, doc);
             }

@@ -4375,6 +4375,61 @@ mod inline_with_only_block_children_tests {
 }
 
 #[cfg(test)]
+mod table_root_tests {
+    use super::*;
+    use crate::node::{CanvasData, SpecialElementData};
+    use crate::qual_name;
+    use blitz_traits::shell::ColorScheme;
+
+    /// A table box can be a replaced element (`display: table` on a canvas), so
+    /// the table context cannot share the element's `special_data` slot: doing
+    /// so destroyed the canvas data, and the replaced-element intrinsic size
+    /// switch then hit `unreachable!()` and aborted the process
+    /// (`html/rendering/replaced-elements/embedded-content-rendering-rules/canvas-fallback.html`).
+    #[test]
+    fn display_table_canvas_keeps_its_canvas_data() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        doc.add_user_agent_stylesheet(crate::UserAgentStylesheet::parse(
+            "html, body { display: block } canvas { display: table; width: 10px; height: 10px }",
+        ));
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        mutator.append_children(root_id, &[html]);
+        let body = mutator.create_element(qual_name!("body"), vec![]);
+        mutator.append_children(html, &[body]);
+        let canvas = mutator.create_element(qual_name!("canvas"), vec![]);
+        mutator.append_children(body, &[canvas]);
+        // Fallback content, so construction does not stop at the empty node
+        // before it builds the table box.
+        let fallback = mutator.create_text_node("FAIL");
+        mutator.append_children(canvas, &[fallback]);
+        drop(mutator);
+
+        // The embedder attaches the paint source before layout runs.
+        doc.nodes[canvas].element_data_mut().unwrap().special_data =
+            SpecialElementData::Canvas(CanvasData {
+                custom_paint_source_id: 1,
+            });
+
+        doc.resolve(0.0);
+
+        let element = doc.nodes[canvas].element_data().unwrap();
+        assert!(
+            element.table_root.is_some(),
+            "a table box must record its table context"
+        );
+        assert!(
+            matches!(element.special_data, SpecialElementData::Canvas(_)),
+            "the table context must not overwrite the represented content"
+        );
+    }
+}
+
+#[cfg(test)]
 mod font_face_override_tests {
     use super::*;
     use crate::net::{FontFaceOverrides, Resource, ResourceLoadResponse};

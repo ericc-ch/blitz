@@ -1604,7 +1604,6 @@ impl<'doc> DocumentMutator<'doc> {
                 SpecialElementData::Canvas(_) => {
                     self.recompute_is_animating = true;
                 }
-                SpecialElementData::TableRoot(_) => {}
                 SpecialElementData::TextInput(_) => {}
                 SpecialElementData::CheckboxInput => {}
                 #[cfg(feature = "file-input")]

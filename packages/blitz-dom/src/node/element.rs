@@ -142,6 +142,12 @@ pub struct ElementData {
     /// Layout output state (`None` until layout first writes to this node).
     pub layout_data: Option<Box<LayoutData>>,
     pub transform: Option<Box<Affine>>,
+
+    /// Pre-computed table layout data for an element that is a table box
+    /// (`display: table`). Table structure is not replaced content, so it
+    /// cannot share [`Self::special_data`] with it: a `<canvas>` styled
+    /// `display: table` keeps its canvas data.
+    pub table_root: Option<Arc<TableContext>>,
 }
 
 /// What a write to a form-control slot does to the spec's dirty flag.
@@ -452,6 +458,9 @@ impl Clone for ElementData {
             display_constructed_as: StyloDisplay::Block,
             layout_data: None,
             transform: None,
+            // Table structure is a layout product, not element content: a
+            // clone is laid out again.
+            table_root: None,
         }
     }
 }
@@ -462,7 +471,6 @@ pub enum SpecialElementType {
     Stylesheet,
     Image,
     Canvas,
-    TableRoot,
     TextInput,
     CheckboxInput,
     #[cfg(feature = "file-input")]
@@ -485,8 +493,6 @@ pub enum SpecialElementData {
     Image(Box<ImageData>),
     /// A \<canvas\> element's custom paint source
     Canvas(CanvasData),
-    /// Pre-computed table layout data
-    TableRoot(Arc<TableContext>),
     /// Parley text editor (text inputs)
     TextInput(TextInputData),
     /// A checkbox or radio input's widget. Its checked state is the control
@@ -509,7 +515,6 @@ impl Clone for SpecialElementData {
             Self::Stylesheet(data) => Self::Stylesheet(data.clone()),
             Self::Image(data) => Self::Image(data.clone()),
             Self::Canvas(data) => Self::Canvas(data.clone()),
-            Self::TableRoot(data) => Self::TableRoot(data.clone()),
             Self::TextInput(data) => Self::TextInput(data.clone()),
             Self::CheckboxInput => Self::CheckboxInput,
             #[cfg(feature = "file-input")]
@@ -570,6 +575,7 @@ impl ElementData {
             display_constructed_as: StyloDisplay::Block,
             layout_data: None,
             transform: None,
+            table_root: None,
         };
         data.flush_is_focussable();
         data.flush_link_state();
@@ -1251,7 +1257,6 @@ impl std::fmt::Debug for SpecialElementData {
                 ImageData::None => f.write_str("NodeSpecificData::Image(None)"),
             },
             SpecialElementData::Canvas(_) => f.write_str("NodeSpecificData::Canvas"),
-            SpecialElementData::TableRoot(_) => f.write_str("NodeSpecificData::TableRoot"),
             SpecialElementData::TextInput(_) => f.write_str("NodeSpecificData::TextInput"),
             SpecialElementData::CheckboxInput => f.write_str("NodeSpecificData::CheckboxInput"),
             #[cfg(feature = "file-input")]

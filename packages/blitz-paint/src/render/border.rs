@@ -1,6 +1,5 @@
 use anyrender::PaintScene;
 use blitz_dom::CopyStyleGetters;
-use blitz_dom::node::SpecialElementData;
 use kurbo::{BezPath, Cap, Circle, Insets, Join, PathEl, Point, Rect, Shape as _, Stroke, Vec2};
 use peniko::{Color, Fill};
 use smallvec::SmallVec;
@@ -511,7 +510,7 @@ impl ElementCx<'_, '_> {
     }
 
     pub(crate) fn draw_table_borders(&self, scene: &mut impl PaintScene) {
-        let SpecialElementData::TableRoot(table) = &self.element.special_data else {
+        let Some(table) = &self.element.table_root else {
             return;
         };
         // Borders are only handled at the table level when BorderCollapse::Collapse

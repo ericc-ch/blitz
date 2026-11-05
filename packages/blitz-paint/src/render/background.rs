@@ -4,7 +4,7 @@ use crate::gradient::to_peniko_gradient;
 use anyrender::PaintScene;
 use blitz_dom::CopyStyleGetters;
 use blitz_dom::NodeId;
-use blitz_dom::node::{ImageData, ImageResourceData, SpecialElementData};
+use blitz_dom::node::{ImageData, ImageResourceData};
 use kurbo::{self, Affine, BezPath, Point, Rect, Shape, Size, Vec2};
 use peniko::{self, BlendMode, Compose, Fill, Mix};
 use style::{
@@ -271,7 +271,7 @@ impl ElementCx<'_, '_> {
     /// `border-spacing` between them, nor where a row has no cell), so they are
     /// painted cell by cell.
     pub(super) fn draw_table_row_backgrounds(&self, scene: &mut impl PaintScene) {
-        let SpecialElementData::TableRoot(table) = &self.element.special_data else {
+        let Some(table) = &self.element.table_root else {
             return;
         };
 
