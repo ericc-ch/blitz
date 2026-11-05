@@ -2007,13 +2007,21 @@ impl BaseDocument {
         match resource {
             Resource::Css(css) => {
                 let node_id = res.node_id.unwrap();
+                // A response that outlives the tree it was requested from has
+                // no owner left to attach the sheet to. A document that is
+                // rebuilt in place (`parsererror` for a non-well-formed XML
+                // response, `document.open`) drops the old nodes, and node ids
+                // are generation-checked, so a missing node can only be the
+                // request's own owner: no surviving node can answer for it.
+                // Installing on a reused slot instead would silently give an
+                // unrelated element a sheet.
+                let Some(node) = self.nodes.get(node_id) else {
+                    return;
+                };
                 // A processing instruction accepts only the response of the
                 // load its current data started. No entry means the data
                 // stopped naming a sheet, so a late response installs nothing.
-                if self
-                    .nodes
-                    .get(node_id)
-                    .is_some_and(|node| matches!(node.data, NodeData::ProcessingInstruction { .. }))
+                if matches!(node.data, NodeData::ProcessingInstruction { .. })
                     && self.pi_stylesheet_requests.get(&node_id) != Some(&res.request_id)
                 {
                     return;
@@ -4371,6 +4379,57 @@ mod inline_with_only_block_children_tests {
         drop(mutator);
         doc.resolve(0.0);
         assert!(!doc.nodes[span].is_inline_with_only_block_children());
+    }
+}
+
+#[cfg(test)]
+mod stale_resource_response_tests {
+    use super::*;
+    use crate::net::{Resource, ResourceLoadResponse};
+    use crate::qual_name;
+
+    /// A stylesheet response whose owner node no longer exists installs
+    /// nothing.
+    ///
+    /// A document rebuilt in place — the `parsererror` tree for a
+    /// non-well-formed XML response, `document.open` — drops the old nodes
+    /// while the fetches they started are still in flight. The response used
+    /// to index the removed node and abort the whole process, which is what
+    /// `css/CSS2/text/white-space-processing-00{5,6,7}.xht` hit after their
+    /// character references were (wrongly) reported as XML errors.
+    #[test]
+    fn stylesheet_response_after_owner_dropped_is_ignored() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        let root = document.root_node().id;
+        let link = document
+            .mutate()
+            .create_element(qual_name!("link"), Vec::new());
+        document.mutate().append_children(root, &[link]);
+
+        // The `@import`/`<link>` sheet the fetch would deliver.
+        let sheet = document.make_stylesheet("div { color: red }", Origin::Author);
+
+        // Drop the tree the node belongs to, as a rebuilt document does.
+        document.mutate().remove_and_drop_all_children(root);
+        assert!(
+            document.get_node(link).is_none(),
+            "the wipe must free the link's slot"
+        );
+
+        document.load_resource(ResourceLoadResponse {
+            request_id: 0,
+            node_id: Some(link),
+            resolved_url: None,
+            image_key: None,
+            origin_clean: false,
+            result: Ok(Resource::Css(sheet)),
+        });
+
+        assert_eq!(
+            document.stylesheet_owner_nodes().count(),
+            0,
+            "a response that outlived its owner must not install a sheet"
+        );
     }
 }
 
