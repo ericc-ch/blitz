@@ -614,9 +614,7 @@ impl BuildBezpath for BezPath {
 
 /// Get the start angle of the arc based on the border width and the radii
 fn start_angle(bt_width: f64, br_width: f64, radii: Vec2) -> f64 {
-    // slope of the border intersection split
-    let w = bt_width / br_width;
-    let x = radii.y / (w * radii.x);
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, SQRT_2};
 
     /*
     Any point on an ellipse is given by:
@@ -649,11 +647,31 @@ fn start_angle(bt_width: f64, br_width: f64, radii: Vec2) -> f64 {
 
     This form is well behaved for all k >= 0 (in particular around k == 2,
     which occurs for perfectly ordinary elliptical corners, e.g. a 80px/30px
-    radius with 40px/10px border widths), always yielding t in [0, π/2).
+    radius with 40px/10px border widths), always yielding t in [0, π/2].
+
+    `w = bt_width / br_width`, so a side whose border width is zero takes the
+    ratio to zero or infinity. Evaluating those as limits keeps the returned
+    angle finite: when the side measured by `bt_width` has no border it owns the
+    whole corner (`t -> π/2`), when the side measured by `br_width` has no
+    border the other side owns it (`t -> 0`), and when both are zero the quarter
+    arc is halved.
     */
 
-    use std::f64::consts::SQRT_2;
-    let sqrt_x = x.sqrt();
+    // k = radii.y / (w * radii.x), rearranged so that a zero width becomes a
+    // zero or infinite k instead of a NaN. The limits are evaluated directly
+    // because sqrt(infinity) / (sqrt(infinity) + sqrt(2)) is itself NaN.
+    let k = if br_width == 0.0 {
+        if bt_width == 0.0 {
+            return FRAC_PI_4;
+        }
+        return 0.0;
+    } else if bt_width == 0.0 {
+        return FRAC_PI_2;
+    } else {
+        radii.y * br_width / (bt_width * radii.x)
+    };
+
+    let sqrt_x = k.sqrt();
     let s = sqrt_x / (sqrt_x + SQRT_2);
     s.atan() * 2.0
 }
@@ -745,6 +763,68 @@ mod tests {
                 "{edge:?}: no point reached the outer edge {expected}"
             );
         }
+    }
+
+    /// Regression test for `css/css-borders/border-radius-greater-than-width.html`:
+    /// a corner whose radius is larger than one of the adjacent border widths.
+    /// The border-colour split angle used to divide by a zero border width and
+    /// put `NaN` points in the edge path, which aborted tiny-skia while filling
+    /// it. Every edge path must stay finite and inside the border box.
+    #[test]
+    fn border_radius_greater_than_width_is_finite() {
+        let frame = CssBox::new(
+            Rect::new(0.0, 0.0, 109.0, 200.0),
+            Insets {
+                x0: 100.0,
+                y0: 100.0,
+                x1: 0.0,
+                y1: 0.0,
+            },
+            Insets::ZERO,
+            0.0,
+            NonUniformRoundedRectRadii {
+                top_right: Vec2::new(10.0, 10.0),
+                bottom_left: Vec2::new(10.0, 10.0),
+                ..Default::default()
+            },
+        );
+
+        for edge in [Edge::Top, Edge::Right, Edge::Bottom, Edge::Left] {
+            let path = frame.border_edge_shape(edge);
+            for el in path.elements() {
+                let points: Vec<Point> = match *el {
+                    PathEl::MoveTo(p) | PathEl::LineTo(p) => vec![p],
+                    PathEl::QuadTo(a, b) => vec![a, b],
+                    PathEl::CurveTo(a, b, c) => vec![a, b, c],
+                    PathEl::ClosePath => vec![],
+                };
+                for p in points {
+                    assert!(
+                        p.is_finite()
+                            && (-0.01..=109.01).contains(&p.x)
+                            && (-0.01..=200.01).contains(&p.y),
+                        "{edge:?}: point {p:?} in {path:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A corner with a zero border width on one or both sides has no sharp
+    /// colour boundary; the split angle has to fall out as a finite limit
+    /// rather than `0 / 0`. `bt_width` is the width of the side that the arc
+    /// sweeps from, so an absent `bt` side means the split sits at the end of
+    /// that side's half of the quarter arc, and an absent `br` side puts the
+    /// split at its start.
+    #[test]
+    fn start_angle_handles_zero_border_widths() {
+        let radii = Vec2::new(10.0, 10.0);
+        // No border on the `br` side: the `bt` side owns the whole corner.
+        assert_eq!(start_angle(5.0, 0.0, radii), 0.0);
+        // No border on the `bt` side: the `br` side owns the whole corner.
+        assert!((start_angle(0.0, 5.0, radii) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        // No border at all: the quarter arc is halved.
+        assert_eq!(start_angle(0.0, 0.0, radii), std::f64::consts::FRAC_PI_4);
     }
 
     #[test]
