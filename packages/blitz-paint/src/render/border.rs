@@ -318,25 +318,23 @@ impl ElementCx<'_, '_> {
             return;
         }
 
-        // Group together identical colors by sorting, then fill each group as a
-        // single path.
-        borders.sort_unstable_by(|a, b| {
-            a.0.components
-                .partial_cmp(&b.0.components)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut start = 0;
-        while start < borders.len() {
-            let color = borders[start].0;
-            let mut path = std::mem::take(&mut borders[start].1);
-            let mut next = start + 1;
-            while next < borders.len() && borders[next].0 == color {
-                path.extend(&borders[next].1);
-                next += 1;
+        // Fill every edge of the same colour as one path, in the order the first
+        // edge of that colour appears. Painting in edge order keeps the
+        // anti-aliasing along a corner shared by two different-coloured edges the
+        // same as painting the sides one by one: the later side wins the shared
+        // pixel. Collecting all edges of one colour into a single fill avoids a
+        // seam where same-coloured sides meet, because two partial coverages of
+        // the same colour composited one after the other would lighten the join.
+        let mut groups: SmallVec<[(Color, BezPath); 8]> = SmallVec::new();
+        for (color, path) in borders {
+            match groups.iter_mut().find(|(group, _)| *group == color) {
+                Some((_, group_path)) => group_path.extend(&path),
+                None => groups.push((color, path)),
             }
+        }
+
+        for (color, path) in groups {
             scene.fill(Fill::NonZero, self.transform, color, None, &path);
-            start = next;
         }
     }
 
