@@ -610,20 +610,32 @@ fn collect_layout_children_with_wrap(
 
             // TODO: fix display:contents
             if classification.all_inline {
-                let existing_layout = doc.nodes[container_node_id]
-                    .element_data_mut()
-                    .and_then(|el| el.inline_layout_data.take());
-                let layout = existing_layout.unwrap_or_else(|| Box::new(TextLayout::new()));
+                // Inline layout belongs to a container box. A document or
+                // fragment container has no element data to store it on, and
+                // the document node is laid out as a block without ever
+                // reading it (`layout::compute_layout` matches
+                // `NodeData::Document` before the inline-root check), so
+                // building one for it would only be a dead deferred task.
+                // An XHTML document with an out-of-flow root element reaches
+                // here through the doctype, which generates no box but votes
+                // as an inline child; the task used to be applied with
+                // `element_data_mut().unwrap()` and aborted the process.
+                if doc.nodes[container_node_id].element_data().is_some() {
+                    let existing_layout = doc.nodes[container_node_id]
+                        .element_data_mut()
+                        .and_then(|el| el.inline_layout_data.take());
+                    let layout = existing_layout.unwrap_or_else(|| Box::new(TextLayout::new()));
 
-                // Queue node for inline layout construction. Deferring construction of inline layouts to a
-                // dedicated phase allows us to multithread the expensive text shaping step.
-                doc.deferred_construction_nodes.push(ConstructionTask {
-                    node_id: container_node_id,
-                    data: ConstructionTaskData::InlineLayout(layout),
-                });
-                doc.nodes[container_node_id]
-                    .flags
-                    .insert(NodeFlags::IS_INLINE_ROOT);
+                    // Queue node for inline layout construction. Deferring construction of inline layouts to a
+                    // dedicated phase allows us to multithread the expensive text shaping step.
+                    doc.deferred_construction_nodes.push(ConstructionTask {
+                        node_id: container_node_id,
+                        data: ConstructionTaskData::InlineLayout(layout),
+                    });
+                    doc.nodes[container_node_id]
+                        .flags
+                        .insert(NodeFlags::IS_INLINE_ROOT);
+                }
 
                 find_inline_layout_embedded_boxes(doc, container_node_id, &mut out.children);
                 return;
@@ -1053,5 +1065,47 @@ pub(crate) fn find_inline_layout_embedded_boxes(
             }
             NodeData::Document(_) => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    use crate::{BaseDocument, DocumentConfig, NodeData, qual_name};
+
+    /// A container with no box (the document node) must not become an inline
+    /// root. Its deferred inline layout could never be applied, and building
+    /// it used to abort the process in `resolve_deferred_tasks`.
+    ///
+    /// The doctype generates no box but is classified as an inline child
+    /// because it has no style, and an absolutely positioned root element is
+    /// out of flow, so the document node used to classify as "all inline".
+    #[test]
+    fn a_document_with_a_doctype_and_an_out_of_flow_root_is_not_an_inline_root() {
+        let mut document = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let document_id = document.root_node().id;
+        let root_id = document.create_node(NodeData::Element(Box::new(
+            crate::node::ElementData::new(qual_name!("html"), vec![]),
+        )));
+        let doctype_id = document.create_node(NodeData::Doctype {
+            name: "html".into(),
+            public_id: String::new(),
+            system_id: String::new(),
+        });
+        {
+            let mut mutator = document.mutate();
+            mutator.set_style_property(root_id, "position", "absolute");
+            mutator.append_children(document_id, &[doctype_id, root_id]);
+        }
+
+        document.resolve(0.0);
+
+        let document_node = document.get_node(document_id).unwrap();
+        assert!(!document_node.flags.is_inline_root());
+        assert!(document_node.element_data().is_none());
     }
 }
