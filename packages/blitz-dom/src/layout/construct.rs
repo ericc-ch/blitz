@@ -417,6 +417,10 @@ fn collect_layout_children_with_wrap(
         .reset_construction_flags();
     if let Some(element_data) = doc.nodes[container_node_id].element_data_mut() {
         element_data.take_inline_layout();
+        // The table context is rebuilt with the box, like the flags above; a
+        // box that is no longer `display: table` must not keep the old one,
+        // because paint reads it without checking the flag.
+        element_data.table_root = None;
     }
 
     flush_pseudo_elements(doc, container_node_id);
