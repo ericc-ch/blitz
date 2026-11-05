@@ -92,6 +92,35 @@ pub struct SvgImageData {
     pub intrinsic_dimensions: SvgIntrinsicDimensions,
 }
 
+/// Why an SVG image could not be converted.
+#[derive(Debug)]
+pub enum SvgError {
+    /// usvg rejected the document.
+    Usvg(usvg::Error),
+    /// A `clip-path` or `mask` reference chain returns to itself.
+    ReferenceCycle {
+        /// The attribute that names the cycle.
+        attribute: &'static str,
+    },
+}
+
+impl From<usvg::Error> for SvgError {
+    fn from(error: usvg::Error) -> Self {
+        Self::Usvg(error)
+    }
+}
+
+impl std::fmt::Display for SvgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usvg(error) => error.fmt(f),
+            Self::ReferenceCycle { attribute } => {
+                write!(f, "the {attribute} reference chain returns to itself")
+            }
+        }
+    }
+}
+
 impl SvgImageData {
     /// Parse an SVG image from raw data, capturing both the rendered
     /// [`usvg::Tree`] and the declared root dimensions from a single XML
@@ -99,7 +128,12 @@ impl SvgImageData {
     ///
     /// Like [`usvg::Tree::from_data`], gzip-compressed data (SVGZ) is
     /// decompressed first.
-    pub fn from_data(data: &[u8], options: &usvg::Options) -> Result<Self, usvg::Error> {
+    ///
+    /// # Errors
+    ///
+    /// The data is not an SVG document usvg can convert, or a `clip-path` or
+    /// `mask` reference chain returns to itself ([`SvgError::ReferenceCycle`]).
+    pub fn from_data(data: &[u8], options: &usvg::Options) -> Result<Self, SvgError> {
         // Gzip magic bytes, matching the SVGZ detection in `usvg::Tree::from_data`.
         let decompressed;
         let data = if data.starts_with(&[0x1f, 0x8b]) {
@@ -116,6 +150,16 @@ impl SvgImageData {
         };
         let doc = roxmltree::Document::parse_with_options(text, xml_options)
             .map_err(usvg::Error::ParsingFailed)?;
+        // usvg follows a `clip-path` or `mask` reference while converting the
+        // element it names, and records only finished conversions, so a cycle
+        // recurses until the process overflows its stack and dies. A clip path
+        // that cannot be resolved is invalid, and an empty clipping path
+        // completely clips away the element that named it
+        // (<https://drafts.csswg.org/css-masking-1/#ClipPathElement>), so the
+        // image is rejected here instead: it paints nothing.
+        if let Some(attribute) = reference_cycle(&doc) {
+            return Err(SvgError::ReferenceCycle { attribute });
+        }
         let intrinsic_dimensions = SvgIntrinsicDimensions::from_xmltree(&doc);
         let tree = match usvg::Tree::from_xmltree(&doc, options) {
             Ok(tree) => tree,
@@ -127,7 +171,7 @@ impl SvgImageData {
                 "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>",
                 options,
             )?,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         Ok(Self {
             tree: Arc::new(tree),
@@ -288,4 +332,194 @@ fn view_box_transform(
     let tx = (width - view_box.width() * sx) * align_x - view_box.x() * sx;
     let ty = (height - view_box.height() * sy) * align_y - view_box.y() * sy;
     usvg::Transform::from_row(sx, 0.0, 0.0, sy, tx, ty)
+}
+
+/// The attribute whose reference chain returns to itself, if any.
+///
+/// usvg 0.48 converts a `<clipPath>` or `<mask>` by walking the elements it
+/// contains, converting every `clip-path`/`mask` they name, and caching only
+/// the conversions that finish. A chain that comes back to an element still
+/// being converted therefore recurses without bound and overflows the stack.
+/// The spec has no rendering for such a reference: the clip path it names is
+/// invalid, and an empty clipping path completely clips away the element that
+/// applied it (<https://drafts.csswg.org/css-masking-1/#ClipPathElement>).
+fn reference_cycle(doc: &roxmltree::Document<'_>) -> Option<&'static str> {
+    [("clipPath", "clip-path"), ("mask", "mask")]
+        .into_iter()
+        .find(|(element, attribute)| has_reference_cycle(doc, element, attribute))
+        .map(|(_, attribute)| attribute)
+}
+
+/// Whether any `<element>` reaches itself through its own `attribute` chains.
+///
+/// An element's `attribute` is resolved while the nearest enclosing
+/// `<element>` is converted, so the graph has one node per `<element>` and one
+/// edge per reference its subtree holds.
+fn has_reference_cycle(doc: &roxmltree::Document<'_>, element: &str, attribute: &str) -> bool {
+    use std::collections::HashMap;
+
+    let containers: HashMap<&str, roxmltree::NodeId> = doc
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == element)
+        .filter_map(|node| node.attribute("id").map(|id| (id, node.id())))
+        .collect();
+    if containers.is_empty() {
+        return false;
+    }
+    let mut edges: HashMap<roxmltree::NodeId, Vec<roxmltree::NodeId>> = HashMap::new();
+    for node in doc.descendants().filter(roxmltree::Node::is_element) {
+        let target = node
+            .attribute(attribute)
+            .and_then(reference_id)
+            .and_then(|id| containers.get(id));
+        let Some(&target) = target else {
+            continue;
+        };
+        // `ancestors` starts at the node itself, so an element that names a
+        // reference from inside its own subtree is its own owner.
+        let owner = node
+            .ancestors()
+            .find(|ancestor| {
+                ancestor.is_element()
+                    && ancestor.tag_name().name() == element
+                    && ancestor.attribute("id").is_some()
+            })
+            .map(|ancestor| ancestor.id());
+        if let Some(owner) = owner {
+            edges.entry(owner).or_default().push(target);
+        }
+    }
+
+    // 1 while a node is on the current path, 2 once its subtree is known
+    // acyclic. Iterative so a deep chain cannot overflow this stack too.
+    let mut state: HashMap<roxmltree::NodeId, u8> = HashMap::new();
+    for &start in containers.values() {
+        if state.get(&start) == Some(&2) {
+            continue;
+        }
+        state.insert(start, 1);
+        let mut stack = vec![(start, 0_usize)];
+        while let Some((node, edge)) = stack.last_mut() {
+            let targets = edges.get(node).map_or(&[][..], Vec::as_slice);
+            let Some(&target) = targets.get(*edge) else {
+                state.insert(*node, 2);
+                stack.pop();
+                continue;
+            };
+            *edge += 1;
+            match state.get(&target) {
+                Some(1) => return true,
+                Some(2) => {}
+                _ => {
+                    state.insert(target, 1);
+                    stack.push((target, 0));
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The `#id` a `url(#id)` attribute value names, if it names one.
+fn reference_id(value: &str) -> Option<&str> {
+    let url = value.trim_start().strip_prefix("url(")?;
+    let inner = &url[..url.find(')')?];
+    let target = inner.trim().trim_matches(['"', '\'']).trim();
+    target.strip_prefix('#').map(str::trim)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SvgError, SvgImageData};
+
+    fn parse(source: &str) -> Result<SvgImageData, SvgError> {
+        SvgImageData::from_data(source.as_bytes(), &usvg::Options::default())
+    }
+
+    /// A `clipPath` chain that returns to its start is rejected, not converted:
+    /// usvg recurses on it until the stack overflows.
+    #[test]
+    fn a_clip_path_cycle_is_rejected() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <defs>
+                <clipPath id="a"><rect width="1" height="1" clip-path="url(#b)"/></clipPath>
+                <clipPath id="b"><rect width="1" height="1" clip-path="url(#a)"/></clipPath>
+            </defs>
+            <circle r="5" clip-path="url(#a)"/>
+        </svg>"#;
+        assert!(matches!(
+            parse(svg),
+            Err(SvgError::ReferenceCycle {
+                attribute: "clip-path"
+            })
+        ));
+    }
+
+    /// The WPT case that crashed the in-process runner: a three-element cycle
+    /// reached through children, with quotes and spaces around the URL.
+    #[test]
+    fn a_clip_path_cycle_through_children_is_rejected() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <defs>
+                <clipPath id="clip0">
+                    <rect width="1" height="1" clip-path="url(#clip)"/>
+                </clipPath>
+                <clipPath id="clip2">
+                    <rect width="100" height="100" clip-path="url( '#clip0' )"/>
+                </clipPath>
+                <clipPath id="clip">
+                    <rect width="1" height="1" clip-path="url(#clip2)"/>
+                </clipPath>
+            </defs>
+            <circle r="5" clip-path="url(#clip)"/>
+        </svg>"#;
+        assert!(matches!(
+            parse(svg),
+            Err(SvgError::ReferenceCycle {
+                attribute: "clip-path"
+            })
+        ));
+    }
+
+    /// The same guard covers `mask`, which usvg converts the same way.
+    #[test]
+    fn a_mask_cycle_is_rejected() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <defs>
+                <mask id="m"><rect width="1" height="1" mask="url(#m)"/></mask>
+            </defs>
+            <circle r="5" mask="url(#m)"/>
+        </svg>"#;
+        assert!(matches!(
+            parse(svg),
+            Err(SvgError::ReferenceCycle { attribute: "mask" })
+        ));
+    }
+
+    /// A nested reference that ends is not a cycle, so a normal SVG still
+    /// converts.
+    #[test]
+    fn a_nested_reference_without_a_cycle_is_accepted() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <defs>
+                <clipPath id="inner"><rect width="1" height="1"/></clipPath>
+                <clipPath id="outer">
+                    <rect width="2" height="2" clip-path="url(#inner)"/>
+                </clipPath>
+            </defs>
+            <circle r="5" clip-path="url(#outer)"/>
+        </svg>"#;
+        assert!(parse(svg).is_ok());
+    }
+
+    /// A reference to an id that does not exist is invalid, not recursive: usvg
+    /// stops at it.
+    #[test]
+    fn a_missing_reference_is_not_a_cycle() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <clipPath id="a"><rect width="1" height="1" clip-path="url(#missing)"/></clipPath>
+            <circle r="5" clip-path="url(#a)"/>
+        </svg>"#;
+        assert!(parse(svg).is_ok());
+    }
 }
