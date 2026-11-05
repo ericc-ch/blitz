@@ -296,10 +296,10 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
         let padding_styles = self.style.get_padding();
         if let Some(basis) = self.percent_basis() {
             let resolve = |value: &stylo::LengthPercentage| {
-                taffy::LengthPercentage::length(
+                taffy::LengthPercentage::length(convert::saturating_px(
                     convert::length_percentage(value)
                         .resolve_or_zero(Some(basis), convert::resolve_calc_value),
-                )
+                ))
             };
             return self.rect(taffy::Rect {
                 left: resolve(&padding_styles.padding_left.0),

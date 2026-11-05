@@ -68,6 +68,24 @@ use stylo::Atom;
 use taffy::CompactLength;
 use taffy::style_helpers::*;
 
+/// The largest used length, in CSS pixels, that layout carries.
+///
+/// Blink's `LayoutUnit` saturates at `2^25` px and every used length passes
+/// through it. Stylo computes used lengths in `f32` instead, and a large enough
+/// `zoom` or `em` value overflows the box-model arithmetic: padding can reach
+/// `1e26` px, and `available_width - left_inset - right_inset` then becomes
+/// `NaN`, which the engines below (Taffy's float context, Parley's line
+/// breaker) treat as a broken invariant and abort on. Saturating here, at the
+/// one boundary where Stylo used values become Taffy and Blitz layout values,
+/// mirrors the browser and keeps the arithmetic finite.
+pub const MAX_USED_LENGTH_PX: f32 = (1 << 25) as f32;
+
+/// Saturation for used lengths; see [`MAX_USED_LENGTH_PX`].
+#[inline]
+pub fn saturating_px(px: f32) -> f32 {
+    px.clamp(-MAX_USED_LENGTH_PX, MAX_USED_LENGTH_PX)
+}
+
 #[inline]
 #[cfg(any(feature = "flexbox", feature = "grid"))]
 pub(crate) fn saturating_i16(input: i32) -> i16 {
@@ -91,7 +109,7 @@ pub fn length_percentage(val: &stylo::LengthPercentage) -> taffy::LengthPercenta
             // SAFETY: calc is a valid value for LengthPercentage
             unsafe { taffy::LengthPercentage::from_raw(val) }
         }
-        stylo::UnpackedLengthPercentage::Length(len) => length(len.px()),
+        stylo::UnpackedLengthPercentage::Length(len) => length(saturating_px(len.px())),
         stylo::UnpackedLengthPercentage::Percentage(percentage) => percent(percentage.0),
     }
 }
@@ -107,7 +125,7 @@ pub fn dimension(val: &stylo::Size) -> taffy::Dimension {
         stylo::Size::FitContent => taffy::Dimension::fit_content(),
         stylo::Size::FitContentFunction(val) => match val.0.unpack() {
             stylo::UnpackedLengthPercentage::Length(len) => {
-                taffy::Dimension::fit_content_px(len.px())
+                taffy::Dimension::fit_content_px(saturating_px(len.px()))
             }
             stylo::UnpackedLengthPercentage::Percentage(percentage) => {
                 taffy::Dimension::fit_content_percent(percentage.0)
@@ -186,7 +204,7 @@ pub fn border(
     if style.none_or_hidden() {
         return taffy::style_helpers::zero();
     }
-    taffy::style_helpers::length(width.0.to_f32_px())
+    taffy::style_helpers::length(saturating_px(width.0.to_f32_px()))
 }
 
 #[inline]
@@ -284,7 +302,7 @@ pub fn box_sizing(input: stylo::BoxSizing) -> taffy::BoxSizing {
 /// [`length_percentage`]) against `parent_size`
 pub fn resolve_calc_value(calc_ptr: *const (), parent_size: f32) -> f32 {
     let calc = unsafe { &*(calc_ptr as *const stylo::CalcLengthPercentage) };
-    calc.resolve(stylo::CSSPixelLength::new(parent_size)).px()
+    saturating_px(calc.resolve(stylo::CSSPixelLength::new(parent_size)).px())
 }
 
 pub fn inset_rect(style: &stylo::ComputedValues) -> taffy::Rect<taffy::LengthPercentageAuto> {

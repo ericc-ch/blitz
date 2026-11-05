@@ -36,6 +36,20 @@ fn subtract_margins(mut child_inputs: LayoutInput, margin: taffy::Rect<f32>) -> 
     child_inputs
 }
 
+/// The line advance Parley can be given: the content slot left by floats, clamped to the layout
+/// advance. A content slot is narrower than zero when the box's own padding and border exceed
+/// its containing block, and Parley's line breaker asserts
+/// `line_max_advance <= layout_max_advance`, so the narrower side has to be represented as an
+/// empty line instead of a negative one.
+#[cfg(feature = "floats")]
+fn slot_line_advance(slot_width: f32, scale: f32, layout_advance: f32) -> f32 {
+    let advance = slot_width * scale;
+    if !advance.is_finite() {
+        return 0.0;
+    }
+    advance.clamp(0.0, layout_advance.max(0.0))
+}
+
 /// Layout inputs for an atomic inline box, with any sizing keyword on its `width` style
 /// (`min-content`, `max-content`, `fit-content`, `fit-content(...)`, `stretch`) resolved
 /// into the available space or known width the box is measured with.
@@ -493,7 +507,9 @@ impl LayoutPassState<'_> {
         };
         // Percentage indents do not contribute to intrinsic widths.
         inline_layout.layout.set_text_indent(
-            text_indent.length.resolve(CSSPixelLength::new(0.0)).px() * scale,
+            stylo_taffy::convert::saturating_px(
+                text_indent.length.resolve(CSSPixelLength::new(0.0)).px() * scale,
+            ),
             indent_options,
         );
 
@@ -612,7 +628,14 @@ impl LayoutPassState<'_> {
                     .max(computed_width)
                     .maybe_clamp(min_width, max_width)
                     - pbw
-            });
+            })
+            // The content box cannot be narrower than empty. A specified width smaller than the
+            // box's own padding and border (border-box sizing) otherwise leaves a negative used
+            // width, and Parley's line breaker requires the line advance it is given not to
+            // exceed the layout advance, so a negative layout advance is not representable
+            // downstream. Blink floors the content width at zero the same way
+            // (`LayoutBox::ComputeContentBoxLogicalWidth`).
+            .max(0.0);
 
         #[cfg(not(feature = "floats"))]
         let _ = block_ctx; // Suppress unused variable warning
@@ -663,9 +686,10 @@ impl LayoutPassState<'_> {
             .length
             .resolve(CSSPixelLength::new((width / scale).max(0.0)))
             .px();
-        inline_layout
-            .layout
-            .set_text_indent(resolved_text_indent * scale, indent_options);
+        inline_layout.layout.set_text_indent(
+            stylo_taffy::convert::saturating_px(resolved_text_indent * scale),
+            indent_options,
+        );
 
         #[cfg(not(feature = "floats"))]
         {
@@ -684,7 +708,7 @@ impl LayoutPassState<'_> {
             let mut has_active_floats = initial_slot.segment_id.is_some();
             let state = breaker.state_mut();
             state.set_layout_max_advance(width);
-            state.set_line_max_advance(initial_slot.width * scale);
+            state.set_line_max_advance(slot_line_advance(initial_slot.width, scale, width));
             state.set_line_x(initial_slot.x * scale);
             state.set_line_y((initial_slot.y * scale) as f64);
 
@@ -709,7 +733,11 @@ impl LayoutPassState<'_> {
                                 block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                             has_active_floats = next_slot.segment_id.is_some();
 
-                            state.set_line_max_advance(next_slot.width * scale);
+                            state.set_line_max_advance(slot_line_advance(
+                                next_slot.width,
+                                scale,
+                                width,
+                            ));
                             state.set_line_x(next_slot.x * scale);
                             state.set_line_y((next_slot.y * scale) as f64);
                         } else {
@@ -767,7 +795,11 @@ impl LayoutPassState<'_> {
                             block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                         has_active_floats = next_slot.segment_id.is_some();
 
-                        state.set_line_max_advance(next_slot.width * scale);
+                        state.set_line_max_advance(slot_line_advance(
+                            next_slot.width,
+                            scale,
+                            width,
+                        ));
                         state.set_line_x(next_slot.x * scale);
                         state.set_line_y((next_slot.y * scale) as f64);
 

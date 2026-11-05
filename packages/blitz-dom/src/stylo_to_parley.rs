@@ -403,7 +403,7 @@ pub(crate) fn vertical_align(style: &stylo::ComputedValues) -> parley::VerticalA
             } else {
                 lp.resolve(Length::new(0.0)).px()
             };
-            parley::BaselineShift::Length(shift)
+            parley::BaselineShift::Length(stylo_taffy::convert::saturating_px(shift))
         }
     };
     parley::VerticalAlign::new(alignment, shift)
@@ -416,25 +416,33 @@ pub(crate) fn style(
     let font_styles = style.get_font();
     let itext_styles = style.get_inherited_text();
 
-    // Convert font size and line height
-    let font_size = font_styles.font_size.used_size.0.px();
+    // Convert font size and line height. Used lengths saturate like the layout
+    // ones: an enormous zoom can make `em`-based spacing exceed what the line
+    // breaker's `f32` arithmetic can carry.
+    let font_size = stylo_taffy::convert::saturating_px(font_styles.font_size.used_size.0.px());
     let line_height = match font_styles.line_height {
         stylo::LineHeight::Normal => parley::LineHeight::NORMAL,
         stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(num.0),
-        stylo::LineHeight::Length(value) => parley::LineHeight::Absolute(value.0.px()),
+        stylo::LineHeight::Length(value) => {
+            parley::LineHeight::Absolute(stylo_taffy::convert::saturating_px(value.0.px()).max(0.0))
+        }
     };
     let vertical_align = self::vertical_align(style);
 
-    let letter_spacing = itext_styles
-        .letter_spacing
-        .0
-        .resolve(Length::new(font_size))
-        .px();
+    let letter_spacing = stylo_taffy::convert::saturating_px(
+        itext_styles
+            .letter_spacing
+            .0
+            .resolve(Length::new(font_size))
+            .px(),
+    );
 
-    let word_spacing = itext_styles
-        .word_spacing
-        .resolve(Length::new(font_size))
-        .px();
+    let word_spacing = stylo_taffy::convert::saturating_px(
+        itext_styles
+            .word_spacing
+            .resolve(Length::new(font_size))
+            .px(),
+    );
 
     // Convert Bold/Italic
     let font_weight = self::font_weight(font_styles.font_weight);
