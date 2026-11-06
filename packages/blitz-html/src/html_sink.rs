@@ -1,6 +1,6 @@
 //! An implementation for Html5ever's sink trait, allowing us to parse HTML into a DOM.
 //!
-//! Note: the XML path (`XmlTreeSink`) resolves only against the `ericc-ch/html5ever`
+//! Note: the XML path (`XmlTreeSink`) resolves only against the `tinybrowser-dev/html5ever`
 //! fork, wired in by tinybrowser's `[patch.crates-io]`. A standalone build of
 //! this fork against registry `xml5ever` (which has no `XmlTreeSink`) fails;
 //! build and test it through the tinybrowser workspace.
