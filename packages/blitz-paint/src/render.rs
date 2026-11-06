@@ -343,7 +343,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         }
         let cx = self.element_cx(node, *node.final_layout(), transform, None);
         let clip = if cx.text_input.is_some() {
-            cx.frame.content_box_path()
+            cx.frame.text_input_clip_path()
         } else {
             cx.frame.padding_box_path()
         };
@@ -530,7 +530,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // here matches the clip applied to the content below.
         let child_clip_rect = if should_clip {
             let clip_box = if is_text_input {
-                cx.frame.content_box_path()
+                cx.frame.text_input_clip_path()
             } else {
                 cx.frame.padding_box_path()
             };
@@ -655,7 +655,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
                         // TODO: allow layers with opacity to be unclipped (overflow: visible)
                         let clip = if is_text_input {
-                            &cx.frame.content_box_path()
+                            &cx.frame.text_input_clip_path()
                         } else {
                             &cx.frame.padding_box_path()
                         };
@@ -979,9 +979,11 @@ impl ElementCx<'_, '_> {
                     panic!("Tried to render node marked as inline root that does not have an inline layout: {:?}", self.node);
                 });
 
+            // Text keeps its unrounded position; only box edges are snapped to whole pixels.
+            let subpixel_offset = text_layout.content_box_subpixel_offset;
             let pos = Point {
-                x: pos.x,
-                y: pos.y + text_layout.block_offset as f64,
+                x: pos.x + subpixel_offset.x as f64,
+                y: pos.y + subpixel_offset.y as f64 + text_layout.block_offset as f64,
             };
             let transform =
                 self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
@@ -1030,9 +1032,10 @@ impl ElementCx<'_, '_> {
             // For single-line inputs, add an offset to vertically center the text input layout
             // within the content box of it's node.
             let y_offset = self.node.text_input_v_centering_offset(self.scale);
+            let subpixel_offset = input_data.content_box_subpixel_offset;
             let pos = Point {
-                x: pos.x,
-                y: pos.y + y_offset,
+                x: pos.x + subpixel_offset.x as f64,
+                y: pos.y + subpixel_offset.y as f64 + y_offset,
             };
 
             // Apply the scroll offset (stored in CSS pixels, scaled here to device pixels) so
@@ -1097,6 +1100,7 @@ impl ElementCx<'_, '_> {
         if let Some(ListItemLayout {
             marker,
             position: ListItemLayoutPosition::Outside(layout),
+            content_box_subpixel_offset,
         }) = self.list_item
         {
             // Right align and pad the bullet when rendering outside
@@ -1128,8 +1132,8 @@ impl ElementCx<'_, '_> {
             };
 
             let pos = Point {
-                x: pos.x + x_offset as f64,
-                y: pos.y + y_offset as f64,
+                x: pos.x + (content_box_subpixel_offset.x + x_offset) as f64,
+                y: pos.y + (content_box_subpixel_offset.y + y_offset) as f64,
             };
 
             let transform =

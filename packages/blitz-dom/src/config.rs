@@ -1,4 +1,6 @@
 use crate::{HtmlParserProvider, UserAgentStylesheet};
+#[cfg(feature = "devtools")]
+use blitz_traits::devtools::DevtoolsProvider;
 use blitz_traits::{
     navigation::NavigationProvider,
     net::{AbortSignal, NetProvider},
@@ -76,6 +78,9 @@ pub struct DocumentConfig {
     /// doctype sniff instead of html5ever's
     /// (<https://html.spec.whatwg.org/multipage/parsing.html#the-initial-insertion-mode>).
     pub quirks_mode: Option<QuirksMode>,
+    /// Devtools provider notified of DOM mutations (e.g. by a remote inspector)
+    #[cfg(feature = "devtools")]
+    pub devtools_provider: Option<Arc<dyn DevtoolsProvider>>,
 }
 
 impl Default for DocumentConfig {
@@ -96,6 +101,8 @@ impl Default for DocumentConfig {
             abort_signal: None,
             subdocument_depth: 0,
             quirks_mode: None,
+            #[cfg(feature = "devtools")]
+            devtools_provider: None,
         }
     }
 }

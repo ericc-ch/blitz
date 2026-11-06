@@ -74,6 +74,9 @@ impl BaseDocument {
             abort_signal: Some(abort_signal),
             subdocument_depth: self.subdocument_depth + 1,
             quirks_mode: Some(self.quirks_mode()),
+            // A sub-document is a separate devtools target with its own provider
+            #[cfg(feature = "devtools")]
+            devtools_provider: None,
         }
     }
 

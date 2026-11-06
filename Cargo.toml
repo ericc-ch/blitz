@@ -9,11 +9,13 @@ members = [
     "packages/blitz-paint",
     "packages/blitz-vibey-script",
     "packages/blitz-shell",
+    "packages/blitz-vibey-cdp-server",
     "packages/blitz",
     "packages/stylo_taffy",
     "packages/dioxus-native",
     "packages/dioxus-native-dom",
     "packages/blitz-test-harness",
+    "packages/parley_code_editor",
     "apps/browser",
     "apps/browser/persistence",
     "apps/readme",
@@ -47,6 +49,7 @@ blitz-net = { version = "=0.3.0-beta.4", path = "./packages/blitz-net", default-
 blitz-paint = { version = "=0.3.0-beta.4", path = "./packages/blitz-paint", default-features = false }
 blitz-vibey-script = { version = "=0.3.0-beta.4", path = "./packages/blitz-vibey-script", default-features = false }
 blitz-shell = { version = "=0.3.0-beta.4", path = "./packages/blitz-shell", default-features = false }
+blitz-vibey-cdp-server = { version = "=0.3.0-beta.4", path = "./packages/blitz-vibey-cdp-server" }
 blitz-traits = { version = "=0.3.0-beta.4", path = "./packages/blitz-traits", default-features = false }
 stylo_taffy = { version = "=0.3.0-beta.4", path = "./packages/stylo_taffy", default-features = false }
 dioxus-native = { version = "0.7.0", path = "./packages/dioxus-native", default-features = false }
@@ -57,13 +60,12 @@ browser-persistence = { path = "./apps/browser/persistence" }
 blitz-test-harness = { path = "./packages/blitz-test-harness" }
 
 # Servo dependencies
-# nicoburns/stylo: -webkit-text-fill-color (servo/stylo#504)
-style = { version = "0.22.0", git = "https://github.com/nicoburns/stylo", rev = "78734bf554bb40af9dc11c0eedbe724f6055697c", package = "stylo" }
-style_traits = { version = "0.22.0", git = "https://github.com/nicoburns/stylo", rev = "78734bf554bb40af9dc11c0eedbe724f6055697c", package = "stylo_traits" }
-style_atoms = { version = "0.22.0", git = "https://github.com/nicoburns/stylo", rev = "78734bf554bb40af9dc11c0eedbe724f6055697c", package = "stylo_atoms" }
-style_config = { version = "0.22.0", git = "https://github.com/nicoburns/stylo", rev = "78734bf554bb40af9dc11c0eedbe724f6055697c", package = "stylo_static_prefs" }
-style_dom = { version = "0.22.0", git = "https://github.com/nicoburns/stylo", rev = "78734bf554bb40af9dc11c0eedbe724f6055697c", package = "stylo_dom" }
-selectors = { version = "0.41.0", git = "https://github.com/nicoburns/stylo", rev = "78734bf554bb40af9dc11c0eedbe724f6055697c", package = "selectors" }
+style = { version = "0.23.0", git = "https://github.com/servo/stylo", rev = "2dca34592ced37c6aa01733e94206a767194cf9d", package = "stylo" }
+style_traits = { version = "0.23.0", git = "https://github.com/servo/stylo", rev = "2dca34592ced37c6aa01733e94206a767194cf9d", package = "stylo_traits" }
+style_atoms = { version = "0.23.0", git = "https://github.com/servo/stylo", rev = "2dca34592ced37c6aa01733e94206a767194cf9d", package = "stylo_atoms" }
+style_config = { version = "0.23.0", git = "https://github.com/servo/stylo", rev = "2dca34592ced37c6aa01733e94206a767194cf9d", package = "stylo_static_prefs" }
+style_dom = { version = "0.23.0", git = "https://github.com/servo/stylo", rev = "2dca34592ced37c6aa01733e94206a767194cf9d", package = "stylo_dom" }
+selectors = { version = "0.42.0", git = "https://github.com/servo/stylo", rev = "2dca34592ced37c6aa01733e94206a767194cf9d", package = "selectors" }
 cssparser = { version = "0.38.0" }
 
 # HTML5ever dependencies
@@ -98,7 +100,7 @@ dioxus-cli-config = { version = "0.8.0-alpha.3" }
 dioxus-core-macro = { version = "0.8.0-alpha.3" }
 
 # Taffy + Parley + Fontations
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "c25605620351786eb6a742b74ea4d289f59ebd84", default-features = false, features = [
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "fca167cf659b8bf48019d0dea90624109a78103f", default-features = false, features = [
     "std",
     "flexbox",
     "flexbox_balance",
@@ -114,14 +116,14 @@ skrifa = { version = "0.44", default-features = false, features = [
 ] } # Should match parley and vello versions
 
 # AnyRender
-anyrender = { version = "0.14.0" }
-anyrender_serialize = { version = "0.8.0" }
-anyrender_skia = { version = "0.12.0" }
-anyrender_vello = { version = "0.15.0" }
-anyrender_vello_cpu = { version = "0.18.0" }
-anyrender_vello_hybrid = { version = "0.11.0" }
-anyrender_svg = { version = "0.15.0" }
-wgpu_context = { version = "0.10.0" }
+anyrender = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+anyrender_serialize = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+anyrender_skia = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+anyrender_vello = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+anyrender_vello_cpu = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+anyrender_vello_hybrid = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+anyrender_svg = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
+wgpu_context = { git = "https://github.com/DioxusLabs/anyrender", branch = "main" }
 
 # Linebender + Fontations + WGPU + SVG
 color = "0.3"
@@ -157,6 +159,8 @@ html-escape = "0.2.13"
 percent-encoding = "2.3.1"
 png = "0.18"
 serde = "1"
+serde_json = "1"
+tungstenite = "0.30"
 
 # Dioxus Native
 webbrowser = "1.0"
@@ -276,6 +280,7 @@ dioxus-native = { workspace = true, features = [
     "floats",
     "svg",
     "prelude",
+    "data-uri",
 ] }
 euclid = { workspace = true }
 url = { workspace = true }
@@ -283,6 +288,7 @@ reqwest = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 image = { workspace = true }
 png = { workspace = true }
+rand = "0.9"
 peniko = { workspace = true }
 color = { workspace = true }
 env_logger = "0.11"
@@ -294,6 +300,18 @@ vello_common = "0.3"
 wgpu = { workspace = true }
 wgpu_context = { workspace = true }
 rustc-hash = { workspace = true }
+
+# glifo 0.4.0 with the unhinted embolden fix (linebender/vello#2049). Drop once it ships.
+[patch.crates-io]
+glifo = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4.0-embolden-2049" }
+vello_common = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4.0-embolden-2049" }
+vello_cpu = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4.0-embolden-2049" }
+vello_gpu = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4.0-embolden-2049" }
+
+# blitz-dom validates the XML name and processing-instruction grammar that
+# lives in the html5ever fork's xml5ever; embedders patch the same crate, and
+# both submodules sit next to each other in third_party.
+xml5ever = { path = "../html5ever/xml5ever" }
 
 # [patch.crates-io]
 # anyrender = { path = "../anyrender/crates/anyrender" }
@@ -317,12 +335,6 @@ rustc-hash = { workspace = true }
 # style_config = { path = "../stylo/stylo_config", package = "stylo_config" }
 # style_dom = { path = "../stylo/stylo_dom", package = "stylo_dom" }
 # selectors = { path = "../stylo/selectors", package = "selectors" }
-
-# blitz-dom validates the XML name and processing-instruction grammar that
-# lives in the html5ever fork's xml5ever; embedders patch the same crate, and
-# both submodules sit next to each other in third_party.
-[patch.crates-io]
-xml5ever = { path = "../html5ever/xml5ever" }
 
 # [patch.crates-io]
 # [patch."https://github.com/dioxuslabs/taffy"]
